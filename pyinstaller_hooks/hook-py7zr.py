@@ -63,8 +63,15 @@ OPTIONAL_MODULES = {
     "backports.zstd": "backports-zstd",
     "compression.zstd": None,
 }
+
+def module_is_available(module_name: str) -> bool:
+    try:
+        return find_spec(module_name) is not None
+    except (ImportError, ModuleNotFoundError, ValueError):
+        return False
+
 for module_name, distribution_name in OPTIONAL_MODULES.items():
-    if find_spec(module_name) is None:
+    if not module_is_available(module_name):
         continue
     package_datas, package_binaries, package_hiddenimports = collect_all(
         module_name,
