@@ -200,7 +200,9 @@ def make_archive_names(items: list[Path]) -> list[str]:
         return []
 
     layouts = [
-        _directory_layout(path) if path.is_dir() else None
+        _directory_layout(path)
+        if isinstance(path, Path) and path.is_dir()
+        else None
         for path in items
     ]
     leaf_keys = [_archive_key(path.name or path.drive or "root") for path in items]
