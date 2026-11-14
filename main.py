@@ -26,7 +26,7 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
 APP_TITLE = "文件加密工具"
-APP_VERSION = "1.1.0"
+APP_VERSION = "1.2.0"
 PASSWORD_LENGTH = 32
 ARCHIVE_NAME_LENGTH = 10
 
@@ -119,96 +119,193 @@ def _archive_key(name: str) -> tuple[str, ...]:
     return tuple(part.rstrip(" .").casefold() for part in normalized.split("/") if part)
 
 
-def make_archive_names(files: list[Path]) -> list[str]:
-    """生成相互不冲突的归档路径，并优先保留所有唯一的原始文件名。
+def _directory_layout(source: Path) -> list[tuple[str, bool]]:
+    """返回 writeall 会写入的目录树成员；布尔值表示目录项。"""
+    layout: list[tuple[str, bool]] = [("", True)]
 
-    唯一叶子名称先占位；重名文件再逐层补充父目录，最后才使用数字后缀。
+    def raise_walk_error(error: OSError) -> None:
+        raise error
+
+    for current, dirnames, filenames in os.walk(
+        source, topdown=True, followlinks=False, onerror=raise_walk_error
+    ):
+        current_path = Path(current)
+        relative_root = current_path.relative_to(source).as_posix()
+        normal_directories: list[str] = []
+
+        for dirname in sorted(dirnames):
+            child = current_path / dirname
+            relative_name = (
+                f"{relative_root}/{dirname}" if relative_root != "." else dirname
+            )
+            if getattr(child, "is_junction", lambda: False)():
+                raise ValueError(
+                    f"文件夹中包含目录联接，无法安全递归打包：{child}"
+                )
+            if child.is_symlink():
+                # py7zr 默认不解引用符号链接；将其作为一个叶子成员处理。
+                layout.append((relative_name, False))
+            else:
+                layout.append((relative_name, True))
+                normal_directories.append(dirname)
+
+        dirnames[:] = normal_directories
+
+        for filename in sorted(filenames):
+            child = current_path / filename
+            if getattr(child, "is_junction", lambda: False)():
+                raise ValueError(
+                    f"文件夹中包含目录联接，无法安全递归打包：{child}"
+                )
+            relative_name = (
+                f"{relative_root}/{filename}" if relative_root != "." else filename
+            )
+            layout.append((relative_name, False))
+
+    return layout
+
+
+def _candidate_archive_names(source: Path) -> list[str]:
+    """依次生成叶子名称、逐层父目录限定名称。"""
+    leaf = source.name
+    if not leaf:
+        leaf = source.drive.rstrip("\\\\/:") or "root"
+
+    segments = [leaf]
+    candidates = [leaf]
+    current = source.parent
+    while current.name:
+        segments.insert(0, current.name)
+        candidates.append("/".join(segments))
+        current = current.parent
+
+    if source.drive:
+        drive_label = source.drive.replace("\\", "/").strip("/").rstrip(":")
+        drive_parts = [part for part in drive_label.split("/") if part]
+        if drive_parts:
+            drive_candidate = "/".join(drive_parts + segments)
+            if drive_candidate not in candidates:
+                candidates.append(drive_candidate)
+
+    return candidates
+
+
+def make_archive_names(items: list[Path]) -> list[str]:
+    """为文件和文件夹分配无冲突的归档路径。
+
+    文件夹会把根目录、子目录和子文件视为一个整体参与冲突检测；
+    因而独立文件不能覆盖某个文件夹内部的成员路径。
     """
-    if not files:
+    if not items:
         return []
 
-    leaf_keys = [_archive_key(path.name) for path in files]
-    counts: dict[tuple[str, ...], int] = {}
+    layouts = [
+        _directory_layout(path) if path.is_dir() else None
+        for path in items
+    ]
+    leaf_keys = [_archive_key(path.name or path.drive or "root") for path in items]
+    leaf_counts: dict[tuple[str, ...], int] = {}
     for key in leaf_keys:
-        counts[key] = counts.get(key, 0) + 1
+        leaf_counts[key] = leaf_counts.get(key, 0) + 1
 
-    used_files: set[tuple[str, ...]] = set()
-    used_dirs: set[tuple[str, ...]] = set()
-    result: list[str | None] = [None] * len(files)
+    # namespace 同时记录显式成员和隐式父目录。True=目录，False=文件。
+    namespace: dict[tuple[str, ...], bool] = {}
+    explicit_members: set[tuple[str, ...]] = set()
+    result: list[str | None] = [None] * len(items)
 
-    def conflicts(candidate: str) -> bool:
-        key = _archive_key(candidate)
-        if not key or key in used_files or key in used_dirs:
-            return True
-        return any(key[:index] in used_files for index in range(1, len(key)))
+    def entries_for(index: int, candidate: str) -> list[tuple[str, bool]]:
+        layout = layouts[index]
+        if layout is None:
+            return [(candidate, False)]
+        return [
+            (candidate if not relative else f"{candidate}/{relative}", is_directory)
+            for relative, is_directory in layout
+        ]
 
-    def reserve(candidate: str) -> None:
-        key = _archive_key(candidate)
-        if not key:
-            raise ValueError(f"无效的归档文件名：{candidate!r}")
-        used_files.add(key)
-        for index in range(1, len(key)):
-            used_dirs.add(key[:index])
+    def can_reserve(index: int, candidate: str) -> bool:
+        proposed: dict[tuple[str, ...], bool] = {}
+        for member, is_directory in entries_for(index, candidate):
+            key = _archive_key(member)
+            if not key or key in proposed:
+                return False
+            proposed[key] = is_directory
 
-    # 先保护所有唯一叶子名称，避免后续重复项抢占它们。
-    for index, path in enumerate(files):
-        if counts[leaf_keys[index]] == 1:
-            candidate = path.name
-            if conflicts(candidate):
-                raise RuntimeError(f"唯一文件名发生意外冲突：{candidate}")
-            reserve(candidate)
-            result[index] = candidate
+        for key, is_directory in proposed.items():
+            if key in explicit_members:
+                return False
 
-    for index, path in enumerate(files):
-        if result[index] is not None:
-            continue
+            existing = namespace.get(key)
+            if existing is not None:
+                # 允许把先前仅作为父路径出现的隐式目录升级为显式目录。
+                if not (is_directory and existing and key not in explicit_members):
+                    return False
 
-        segments: list[str] = []
-        current = path.parent
-        candidate: str | None = None
-        while current.name:
-            segments.insert(0, current.name)
-            trial = "/".join(segments + [path.name])
-            if not conflicts(trial):
-                candidate = trial
+            for depth in range(1, len(key)):
+                parent = key[:depth]
+                if namespace.get(parent) is False:
+                    return False
+                if proposed.get(parent) is False:
+                    return False
+
+        return True
+
+    def reserve(index: int, candidate: str) -> None:
+        for member, is_directory in entries_for(index, candidate):
+            key = _archive_key(member)
+            for depth in range(1, len(key)):
+                namespace.setdefault(key[:depth], True)
+            namespace[key] = is_directory
+            explicit_members.add(key)
+
+    # 先为唯一名称保留原始叶子名，避免重复项抢占唯一名称。
+    allocation_order = [
+        index for index in range(len(items)) if leaf_counts[leaf_keys[index]] == 1
+    ] + [
+        index for index in range(len(items)) if leaf_counts[leaf_keys[index]] > 1
+    ]
+
+    for index in allocation_order:
+        source = items[index]
+        candidates = _candidate_archive_names(source)
+        if leaf_counts[leaf_keys[index]] > 1:
+            # 重名项优先补充父目录，不让第一个项目独占原始叶子名。
+            candidates = candidates[1:]
+
+        selected: str | None = None
+        for candidate in candidates:
+            if can_reserve(index, candidate):
+                selected = candidate
                 break
-            current = current.parent
 
-        # 路径退到盘符根目录时，保留盘符以区分不同卷。
-        if candidate is None and path.drive:
-            drive_label = path.drive.replace("\\", "/").strip("/").rstrip(":")
-            drive_parts = [part for part in drive_label.split("/") if part]
-            if drive_parts:
-                trial = "/".join(drive_parts + segments + [path.name])
-                if not conflicts(trial):
-                    candidate = trial
-
-        if candidate is None:
-            stem, suffix = path.stem, path.suffix
+        if selected is None:
+            if source.is_dir():
+                stem, suffix = source.name or "folder", ""
+            else:
+                stem, suffix = source.stem, source.suffix
             number = 2
             while True:
-                trial = f"{stem}_{number}{suffix}"
-                if not conflicts(trial):
-                    candidate = trial
+                candidate = f"{stem}_{number}{suffix}"
+                if can_reserve(index, candidate):
+                    selected = candidate
                     break
                 number += 1
 
-        reserve(candidate)
-        result[index] = candidate
+        reserve(index, selected)
+        result[index] = selected
 
     return [name.replace("\\", "/") for name in result if name is not None]
 
 
-def deduplicate_files(items: list[str | Path]) -> list[Path]:
-    """按解析路径及文件身份去重，覆盖符号链接和可识别的硬链接。"""
-    paths: list[Path] = []
+def deduplicate_items(items: list[str | Path]) -> list[Path]:
+    """解析路径、按文件身份去重，并自动移除已被父文件夹包含的条目。"""
+    resolved: list[Path] = []
     seen_paths: set[str] = set()
     seen_file_ids: set[tuple[int, int]] = set()
 
     for item in items:
         path = Path(item).resolve()
-        if not path.is_file():
-            raise FileNotFoundError(f"找不到文件：{path}")
+        if not path.is_file() and not path.is_dir():
+            raise FileNotFoundError(f"找不到文件或文件夹：{path}")
 
         path_key = os.path.normcase(str(path))
         if path_key in seen_paths:
@@ -222,10 +319,27 @@ def deduplicate_files(items: list[str | Path]) -> list[Path]:
         seen_paths.add(path_key)
         if stat.st_ino:
             seen_file_ids.add(file_id)
-        paths.append(path)
+        resolved.append(path)
 
+    # 不论父文件夹是在队列中先添加还是后添加，都只保留父文件夹。
+    return [
+        path
+        for path in resolved
+        if not any(
+            parent != path
+            and parent.is_dir()
+            and path.is_relative_to(parent)
+            for parent in resolved
+        )
+    ]
+
+
+def deduplicate_files(items: list[str | Path]) -> list[Path]:
+    """保留旧接口：仅接受文件的调用仍可使用此包装函数。"""
+    paths = deduplicate_items(items)
+    if any(not path.is_file() for path in paths):
+        raise FileNotFoundError("该操作只接受文件。")
     return paths
-
 
 def _notify_progress(callback: Callable[[str], None] | None, message: str) -> None:
     if callback is not None:
@@ -235,8 +349,29 @@ def _notify_progress(callback: Callable[[str], None] | None, message: str) -> No
             logging.exception("进度通知失败")
 
 
+def _expected_archive_members(
+    paths: list[Path], archive_names: list[str]
+) -> list[str]:
+    """列出每个输入在归档中应出现的全部成员，包括空目录。"""
+    expected: list[str] = []
+    for source, archive_name in zip(paths, archive_names):
+        if source.is_dir():
+            layout = _directory_layout(source)
+            expected.extend(
+                archive_name if not relative else f"{archive_name}/{relative}"
+                for relative, _is_directory in layout
+            )
+        else:
+            expected.append(archive_name)
+
+    keys = [_archive_key(name.rstrip("/")) for name in expected]
+    if len(keys) != len(set(keys)):
+        raise RuntimeError("归档成员路径发生冲突，已在创建压缩包前中止。")
+    return expected
+
+
 def create_encrypted_bundle(
-    files: list[str],
+    items: list[str | Path],
     output_folder: str,
     progress_callback: Callable[[str], None] | None = None,
 ) -> tuple[str, str]:
@@ -246,15 +381,26 @@ def create_encrypted_bundle(
     except ImportError as exc:
         raise RuntimeError("加密组件缺失，请重新下载完整的官方 EXE 版本。") from exc
 
-    paths = deduplicate_files(files)
+    paths = deduplicate_items(items)
     if not paths:
-        raise ValueError("没有选择文件。")
+        raise ValueError("没有选择文件或文件夹。")
 
     out_dir = Path(output_folder).resolve()
     if not out_dir.is_dir():
         raise NotADirectoryError("输出位置无效。")
 
+    # 在任何临时文件创建之前阻断输出目录落入源文件夹树的情况。
+    for source in paths:
+        if source.is_dir() and (
+            out_dir == source or out_dir.is_relative_to(source)
+        ):
+            raise ValueError(
+                f"输出文件夹位于待加密文件夹内部：{source}\n"
+                "请将输出位置更换到该源文件夹之外。"
+            )
+
     archive_names = make_archive_names(paths)
+    expected_members = _expected_archive_members(paths, archive_names)
     base = make_archive_base(out_dir)
     final_archive = out_dir / f"{base}.7z"
     final_txt = out_dir / f"{base}.txt"
@@ -267,7 +413,10 @@ def create_encrypted_bundle(
         with py7zr.SevenZipFile(str(temp_archive), mode="w", password=password) as archive:
             archive.set_encrypted_header(True)
             for source, archive_name in zip(paths, archive_names):
-                archive.write(str(source), arcname=archive_name)
+                if source.is_dir():
+                    archive.writeall(str(source), arcname=archive_name)
+                else:
+                    archive.write(str(source), arcname=archive_name)
 
         if not temp_archive.exists() or temp_archive.stat().st_size == 0:
             raise RuntimeError("压缩组件没有生成有效的 7z 文件。")
@@ -283,18 +432,31 @@ def create_encrypted_bundle(
 
         with py7zr.SevenZipFile(str(temp_archive), mode="r", password=password) as check:
             names = check.getnames()
-            if len(names) != len(archive_names) or sorted(names) != sorted(archive_names):
-                raise RuntimeError("压缩包内文件列表与预期不一致。")
+            actual_keys = [_archive_key(name.rstrip("/")) for name in names]
+            expected_keys = [
+                _archive_key(name.rstrip("/")) for name in expected_members
+            ]
+            if (
+                len(actual_keys) != len(set(actual_keys))
+                or set(actual_keys) != set(expected_keys)
+            ):
+                missing = sorted(set(expected_keys) - set(actual_keys))
+                extra = sorted(set(actual_keys) - set(expected_keys))
+                raise RuntimeError(
+                    "压缩包成员与预期目录树不一致。"
+                    f"缺失：{missing!r}；多出：{extra!r}"
+                )
+
             bad_member = check.testzip()
             if bad_member is not None:
                 raise RuntimeError(f"压缩包完整性检查失败：{bad_member}")
 
         mappings = "\n".join(
-            f"- {source.name} -> {archive_name}"
+            f"- [{'文件夹' if source.is_dir() else '文件'}] {source.name} -> {archive_name}"
             for source, archive_name in zip(paths, archive_names)
         )
         txt_content = (
-            f"被加密文件名及归档内路径：\n{mappings}\n"
+            f"被加密条目及归档内路径：\n{mappings}\n"
             f"加密后的文件名：{base}.7z\n"
             f"密码：{password}\n"
             f"是否已加密文件名：是\n"
@@ -326,9 +488,8 @@ def create_encrypted_bundle(
             except OSError:
                 logging.warning("无法清理临时文件：%s", temporary_path, exc_info=True)
 
-
 def run_packaged_self_test(report_path: str | None = None) -> int:
-    """由 CI 直接运行打包后的 EXE，检查隐藏导入、元数据和真实加密往返。"""
+    """由 CI 直接运行打包后的 EXE，检查依赖和真实文件夹加密往返。"""
     report: dict[str, object] = {
         "app_version": APP_VERSION,
         "python_version": platform.python_version(),
@@ -372,15 +533,19 @@ def run_packaged_self_test(report_path: str | None = None) -> int:
 
         with tempfile.TemporaryDirectory(prefix="7z-encrypt-selftest-") as temp:
             root = Path(temp)
-            source = root / "smoke-test.txt"
+            source_dir = root / "smoke-test-folder"
+            empty_dir = source_dir / "nested" / "empty"
+            payload = source_dir / "nested" / "payload.txt"
             archive_path = root / "smoke-test.7z"
             extract_dir = root / "extracted"
-            source.write_bytes(b"7z encryption tool packaged self-test\n")
+
+            empty_dir.mkdir(parents=True)
+            payload.write_bytes(b"7z folder encryption tool packaged self-test\n")
             password = "SelfTest-" + secrets.token_urlsafe(24)
 
             with py7zr.SevenZipFile(str(archive_path), mode="w", password=password) as archive:
                 archive.set_encrypted_header(True)
-                archive.write(str(source), arcname="smoke-test/smoke-test.txt")
+                archive.writeall(str(source_dir), arcname="smoke-test-folder")
 
             try:
                 with py7zr.SevenZipFile(str(archive_path), mode="r", password=None) as archive:
@@ -390,23 +555,34 @@ def run_packaged_self_test(report_path: str | None = None) -> int:
             else:
                 raise RuntimeError("无密码仍能读取归档文件名，文件头加密自检失败。")
 
+            expected_names = {
+                "smoke-test-folder",
+                "smoke-test-folder/nested",
+                "smoke-test-folder/nested/empty",
+                "smoke-test-folder/nested/payload.txt",
+            }
             with py7zr.SevenZipFile(str(archive_path), mode="r", password=password) as archive:
-                names = archive.getnames()
-                if names != ["smoke-test/smoke-test.txt"]:
-                    raise RuntimeError(f"归档成员名称异常：{names!r}")
+                names = set(name.rstrip("/") for name in archive.getnames())
+                if names != expected_names:
+                    raise RuntimeError(f"文件夹归档成员异常：{names!r}")
                 bad_member = archive.testzip()
                 if bad_member is not None:
                     raise RuntimeError(f"归档完整性自检失败：{bad_member}")
 
-            # testzip() consumes the reader's worker state in some py7zr versions.
-            # Re-open the archive before the extraction phase instead of reusing it.
+            # testzip() 可能消耗 reader 的 worker 状态，重新打开后再解压。
             extract_dir.mkdir()
             with py7zr.SevenZipFile(str(archive_path), mode="r", password=password) as archive:
                 archive.extractall(path=extract_dir)
 
-            extracted = extract_dir / "smoke-test" / "smoke-test.txt"
-            if not extracted.is_file() or extracted.read_bytes() != source.read_bytes():
-                raise RuntimeError("加密归档解压后的内容与原文件不一致。")
+            extracted_payload = extract_dir / "smoke-test-folder" / "nested" / "payload.txt"
+            extracted_empty = extract_dir / "smoke-test-folder" / "nested" / "empty"
+            if (
+                not extracted_payload.is_file()
+                or extracted_payload.read_bytes() != payload.read_bytes()
+                or not extracted_empty.is_dir()
+                or any(extracted_empty.iterdir())
+            ):
+                raise RuntimeError("文件夹归档解压后与原始目录树不一致。")
 
         report.update(
             {
@@ -415,6 +591,8 @@ def run_packaged_self_test(report_path: str | None = None) -> int:
                 "hidden_imports": sorted(modules),
                 "encrypted_header": header_encryption_verified,
                 "archive_round_trip": True,
+                "directory_archive": True,
+                "empty_directory_preserved": True,
             }
         )
         exit_code = 0
@@ -439,57 +617,224 @@ def run_packaged_self_test(report_path: str | None = None) -> int:
             return 1
     return exit_code
 
-
 class EncryptApp:
     def __init__(self, root: tk.Tk):
         self.root = root
         self.is_busy = False
+        self.queue_items: list[Path] = []
+
         root.title(f"{APP_TITLE} v{APP_VERSION}")
-        root.geometry("600x360")
-        root.minsize(540, 320)
+        root.geometry("780x520")
+        root.minsize(640, 440)
         root.resizable(True, True)
         root.protocol("WM_DELETE_WINDOW", self.on_close)
         root.report_callback_exception = self.report_callback_exception
 
-        frame = ttk.Frame(root, padding=24)
+        frame = ttk.Frame(root, padding=20)
         frame.pack(fill="both", expand=True)
+        frame.columnconfigure(0, weight=1)
 
-        ttk.Label(frame, text="文件加密打包", font=("", 18, "bold")).pack(anchor="w")
+        ttk.Label(
+            frame, text="文件加密打包", font=("", 18, "bold")
+        ).grid(row=0, column=0, sticky="w")
+
         ttk.Label(
             frame,
-            text="选择一个或多个文件，再选择输出文件夹。工具会生成加密压缩包和密码记录。",
-            wraplength=520,
+            text=(
+                "添加一个或多个文件，也可以多次添加文件夹。"
+                "点击“开始加密”后再选择输出位置。"
+            ),
+            wraplength=720,
             justify="left",
-        ).pack(anchor="w", pady=(12, 20))
+        ).grid(row=1, column=0, sticky="w", pady=(8, 14))
 
-        self.choose_button = ttk.Button(frame, text="选择要加密的文件", command=self.choose_files)
-        self.choose_button.pack(anchor="w", ipadx=12, ipady=7)
+        actions = ttk.Frame(frame)
+        actions.grid(row=2, column=0, sticky="ew", pady=(0, 8))
 
-        self.status_var = tk.StringVar(value="尚未选择文件")
-        ttk.Label(frame, textvariable=self.status_var, wraplength=520).pack(anchor="w", pady=(18, 8))
+        self.add_files_button = ttk.Button(
+            actions, text="添加文件", command=self.choose_files
+        )
+        self.add_files_button.pack(side="left", padx=(0, 8))
 
-        self.progress = ttk.Progressbar(frame, mode="indeterminate", length=520)
-        self.progress.pack(anchor="w", pady=(4, 12), fill="x")
+        self.add_folder_button = ttk.Button(
+            actions, text="添加文件夹", command=self.choose_folder
+        )
+        self.add_folder_button.pack(side="left", padx=(0, 8))
+
+        self.remove_button = ttk.Button(
+            actions, text="移除选中", command=self.remove_selected
+        )
+        self.remove_button.pack(side="left", padx=(0, 8))
+
+        self.clear_button = ttk.Button(
+            actions, text="清空", command=self.clear_queue
+        )
+        self.clear_button.pack(side="left")
+
+        ttk.Label(frame, text="待加密条目").grid(
+            row=3, column=0, sticky="nw", pady=(4, 4)
+        )
+
+        queue_frame = ttk.Frame(frame)
+        queue_frame.grid(row=4, column=0, sticky="nsew")
+        queue_frame.columnconfigure(0, weight=1)
+        queue_frame.rowconfigure(0, weight=1)
+        frame.rowconfigure(4, weight=1)
+
+        self.queue_tree = ttk.Treeview(
+            queue_frame,
+            columns=("kind", "path"),
+            show="headings",
+            selectmode="extended",
+            height=10,
+        )
+        self.queue_tree.heading("kind", text="类型")
+        self.queue_tree.heading("path", text="路径")
+        self.queue_tree.column("kind", width=92, minwidth=82, stretch=False, anchor="center")
+        self.queue_tree.column("path", width=560, minwidth=220, stretch=True, anchor="w")
+        self.queue_tree.grid(row=0, column=0, sticky="nsew")
+
+        vertical = ttk.Scrollbar(
+            queue_frame, orient="vertical", command=self.queue_tree.yview
+        )
+        vertical.grid(row=0, column=1, sticky="ns")
+        horizontal = ttk.Scrollbar(
+            queue_frame, orient="horizontal", command=self.queue_tree.xview
+        )
+        horizontal.grid(row=1, column=0, sticky="ew")
+        self.queue_tree.configure(
+            yscrollcommand=vertical.set,
+            xscrollcommand=horizontal.set,
+        )
+
+        footer = ttk.Frame(frame)
+        footer.grid(row=5, column=0, sticky="ew", pady=(12, 0))
+        footer.columnconfigure(0, weight=1)
+
+        self.status_var = tk.StringVar(value="待加密条目：0 项")
+        ttk.Label(
+            footer, textvariable=self.status_var, wraplength=540
+        ).grid(row=0, column=0, sticky="w")
+
+        self.start_button = ttk.Button(
+            footer, text="开始加密", command=self.start_encryption
+        )
+        self.start_button.grid(
+            row=0, column=1, sticky="e", padx=(12, 0), ipadx=12, ipady=5
+        )
+
+        self.progress = ttk.Progressbar(frame, mode="indeterminate")
+        self.progress.grid(row=6, column=0, sticky="ew", pady=(10, 8))
 
         ttk.Label(
             frame,
-            text="密码会写入输出文件夹中的 TXT。请妥善保管，不要与压缩包一起发送给不该知道密码的人。",
-            wraplength=520,
+            text=(
+                "密码会写入输出文件夹中的 TXT。请与压缩包分开保管。"
+                "加密或校验期间请勿强制结束程序。"
+            ),
+            wraplength=720,
             foreground="#555555",
             justify="left",
-        ).pack(anchor="w", side="bottom")
+        ).grid(row=7, column=0, sticky="w")
+
+        self.control_buttons = (
+            self.add_files_button,
+            self.add_folder_button,
+            self.remove_button,
+            self.clear_button,
+            self.start_button,
+        )
 
     def report_callback_exception(self, exc_type, exc_value, trace) -> None:
         logging.error("Tkinter 回调异常", exc_info=(exc_type, exc_value, trace))
         detail = str(exc_value) or exc_type.__name__
         messagebox.showerror("程序错误", detail, parent=self.root)
 
+    def _refresh_queue(self) -> None:
+        for item_id in self.queue_tree.get_children():
+            self.queue_tree.delete(item_id)
+
+        for index, source in enumerate(self.queue_items):
+            kind = "文件夹" if source.is_dir() else "文件"
+            self.queue_tree.insert(
+                "", "end", iid=str(index), values=(kind, str(source))
+            )
+
+        self.status_var.set(f"待加密条目：{len(self.queue_items)} 项")
+
+    def add_items(self, selected: list[str | Path]) -> None:
+        if self.is_busy or not selected:
+            return
+
+        combined = [*self.queue_items, *selected]
+        try:
+            normalized = deduplicate_items(combined)
+        except Exception as exc:
+            messagebox.showerror(
+                "无法添加条目", str(exc) or type(exc).__name__, parent=self.root
+            )
+            return
+
+        removed_count = len(combined) - len(normalized)
+        self.queue_items = normalized
+        self._refresh_queue()
+        if removed_count:
+            self.status_var.set(
+                f"已自动去重或移除被父文件夹包含的条目；待加密：{len(normalized)} 项"
+            )
+
     def choose_files(self) -> None:
         if self.is_busy:
             return
+        selected = filedialog.askopenfilenames(
+            title="选择要加密的文件", parent=self.root
+        )
+        if selected:
+            self.add_items(list(selected))
 
-        selected = filedialog.askopenfilenames(title="选择要加密的文件", parent=self.root)
-        if not selected:
+    def choose_folder(self) -> None:
+        if self.is_busy:
+            return
+        selected = filedialog.askdirectory(
+            title="选择要加密的文件夹",
+            mustexist=True,
+            parent=self.root,
+        )
+        if selected:
+            self.add_items([selected])
+
+    def remove_selected(self) -> None:
+        if self.is_busy:
+            return
+        selected_ids = self.queue_tree.selection()
+        if not selected_ids:
+            return
+        selected_indices = {int(item_id) for item_id in selected_ids}
+        self.queue_items = [
+            item for index, item in enumerate(self.queue_items)
+            if index not in selected_indices
+        ]
+        self._refresh_queue()
+
+    def clear_queue(self) -> None:
+        if self.is_busy:
+            return
+        self.queue_items.clear()
+        self._refresh_queue()
+
+    def _set_controls_enabled(self, enabled: bool) -> None:
+        for button in self.control_buttons:
+            button.state(["!disabled"] if enabled else ["disabled"])
+
+    def start_encryption(self) -> None:
+        if self.is_busy:
+            return
+        if not self.queue_items:
+            messagebox.showwarning(
+                "待加密列表为空",
+                "请先点击“添加文件”或“添加文件夹”。",
+                parent=self.root,
+            )
             return
 
         output_folder = filedialog.askdirectory(
@@ -501,9 +846,24 @@ class EncryptApp:
             self.status_var.set("已取消输出位置选择，未生成文件。")
             return
 
+        output_path = Path(output_folder).resolve()
+        for source in self.queue_items:
+            if source.is_dir() and (
+                output_path == source or output_path.is_relative_to(source)
+            ):
+                messagebox.showerror(
+                    "输出位置无效",
+                    "输出文件夹不能位于待加密文件夹本身或其子文件夹中。\n"
+                    f"源文件夹：{source}\n"
+                    "请重新选择源文件夹之外的输出位置。",
+                    parent=self.root,
+                )
+                return
+
+        selected = list(self.queue_items)
         self.is_busy = True
-        self.choose_button.state(["disabled"])
-        self.status_var.set(f"已选择 {len(selected)} 个文件，正在准备……")
+        self._set_controls_enabled(False)
+        self.status_var.set(f"已选择 {len(selected)} 个条目，正在准备……")
         self.progress.start(12)
 
         def report_status(message: str) -> None:
@@ -514,27 +874,35 @@ class EncryptApp:
 
         def worker() -> None:
             try:
-                result = create_encrypted_bundle(list(selected), output_folder, report_status)
-                self.root.after(0, lambda: self.finish_success(result, len(selected)))
+                result = create_encrypted_bundle(
+                    selected, str(output_path), report_status
+                )
+                self.root.after(
+                    0, lambda: self.finish_success(result, len(selected))
+                )
             except Exception as exc:
                 detail = str(exc) or type(exc).__name__
                 logging.exception("加密任务失败")
                 try:
-                    self.root.after(0, lambda detail=detail: self.finish_error(detail))
+                    self.root.after(
+                        0, lambda: self.finish_error(detail)
+                    )
                 except tk.TclError:
                     logging.exception("无法向窗口报告加密失败")
 
-        threading.Thread(target=worker, daemon=False, name="archive-worker").start()
+        threading.Thread(
+            target=worker, daemon=False, name="archive-worker"
+        ).start()
 
     def _finish_task(self) -> None:
         self.is_busy = False
         self.progress.stop()
-        self.choose_button.state(["!disabled"])
+        self._set_controls_enabled(True)
 
     def finish_success(self, result: tuple[str, str], count: int) -> None:
         self._finish_task()
         archive_path, txt_path = result
-        self.status_var.set(f"完成：已处理 {count} 个文件。")
+        self.status_var.set(f"完成：已处理 {count} 个条目。")
         messagebox.showinfo(
             "处理完成",
             f"加密文件已生成。\n\n压缩包：{Path(archive_path).name}\n"
@@ -552,12 +920,11 @@ class EncryptApp:
         if self.is_busy:
             messagebox.showwarning(
                 "正在处理",
-                "文件正在加密打包或校验完整性，请等待当前任务完成后再关闭窗口。",
+                "文件或文件夹正在加密打包或校验完整性，请等待当前任务完成后再关闭窗口。",
                 parent=self.root,
             )
             return
         self.root.destroy()
-
 
 def main() -> int:
     log_file = configure_logging()
