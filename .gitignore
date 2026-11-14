@@ -3,12 +3,23 @@
 .venv*/
 __pycache__/
 *.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# PyInstaller build outputs
+build/
+dist/
+*.manifest
 
 # Generated encrypted archives and temporary outputs
 *.7z
 *.working.*
+*.log
+self-test.json
 
 # Password records are plaintext; do not commit them
 *.txt
 !instructions.txt
 !requirements.txt
+!requirements-build.txt
+!SHA256SUMS.txt
