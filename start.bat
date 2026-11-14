@@ -44,19 +44,12 @@ if errorlevel 1 (
 )
 
 REM The executable's parent directory is the base installation directory; avoid nested CMD quoting in FOR /F.
-for %%I in ("%BASE_PY%") do set "BASE_PREFIX=%%~dpI"
-if not defined BASE_PREFIX (
-    echo [ERROR] Could not determine the base Python installation directory.
-    pause
-    exit /b 1
-)
-
 REM Rebuild a stale or partial virtual environment instead of mixing runtimes.
 set "REBUILD_VENV=0"
 if exist "%VENV%\" (
     if not exist "%PYTHON_EXE%" set "REBUILD_VENV=1"
     if "%REBUILD_VENV%"=="0" (
-        "%PYTHON_EXE%" -c "import pathlib,sys,struct; base=pathlib.Path(sys.argv[1]).resolve(); env=pathlib.Path(sys.argv[2]).resolve(); ok=sys.implementation.name == 'cpython' and sys.version_info[:2] == (3,14) and struct.calcsize('P') == 8 and sys.prefix != sys.base_prefix and pathlib.Path(sys.prefix).resolve() == env and pathlib.Path(sys.base_prefix).resolve() == base; sys.exit(0 if ok else 1)" "%BASE_PREFIX%" "%VENV%" >nul 2>nul
+        "%PYTHON_EXE%" -c "import pathlib,sys,struct; base=pathlib.Path(sys.argv[1]).resolve().parent; env=pathlib.Path(sys.argv[2]).resolve(); ok=sys.implementation.name == 'cpython' and sys.version_info[:2] == (3,14) and struct.calcsize('P') == 8 and sys.prefix != sys.base_prefix and pathlib.Path(sys.prefix).resolve() == env and pathlib.Path(sys.base_prefix).resolve() == base; sys.exit(0 if ok else 1)" "%BASE_PY%" "%VENV%" >nul 2>nul
         if errorlevel 1 set "REBUILD_VENV=1"
     )
 )
@@ -84,7 +77,7 @@ if not exist "%PYTHON_EXE%" (
 
 echo.
 echo Verifying the private runtime:
-"%PYTHON_EXE%" -c "import pathlib,sys,struct; base=pathlib.Path(sys.argv[1]).resolve(); env=pathlib.Path(sys.argv[2]).resolve(); print('Private runtime:',sys.version); print('Executable:',sys.executable); print('Architecture:',struct.calcsize('P')*8,'bit'); ok=sys.implementation.name == 'cpython' and sys.version_info[:2] == (3,14) and struct.calcsize('P') == 8 and sys.prefix != sys.base_prefix and pathlib.Path(sys.prefix).resolve() == env and pathlib.Path(sys.base_prefix).resolve() == base; sys.exit(0 if ok else 1)" "%BASE_PREFIX%" "%VENV%"
+"%PYTHON_EXE%" -c "import pathlib,sys,struct; base=pathlib.Path(sys.argv[1]).resolve(); env=pathlib.Path(sys.argv[2]).resolve(); print('Private runtime:',sys.version); print('Executable:',sys.executable); print('Architecture:',struct.calcsize('P')*8,'bit'); ok=sys.implementation.name == 'cpython' and sys.version_info[:2] == (3,14) and struct.calcsize('P') == 8 and sys.prefix != sys.base_prefix and pathlib.Path(sys.prefix).resolve() == env and pathlib.Path(sys.base_prefix).resolve() == base; sys.exit(0 if ok else 1)" "%BASE_PY%" "%VENV%"
 if errorlevel 1 (
     echo [ERROR] Private runtime verification failed. No dependency installation was attempted.
     pause
