@@ -27,11 +27,13 @@ Each selected folder is stored under a top-level archive path and includes its n
 
 The companion TXT intentionally stores the generated password as plaintext. This is an accepted product requirement, not a defect or an item for routine remediation. Do not remove, encrypt, obscure, relocate, or repeatedly flag this behavior unless the owner explicitly changes the requirement. See [Decision 0001](docs/decisions/0001-plaintext-password-companion-file.md).
 
-## Signed releases and CI artifacts
+## Unsigned releases and SHA-256 verification
 
-Official tagged and `release/*` builds are published only after the Windows EXE has been signed with Microsoft Artifact Signing, its Authenticode signature has been verified, and the final SHA-256 checksum has been generated. Pull-request, `main`, and `maintenance/*` Actions artifacts are CI-only builds and are not publisher-signed.
+The project intentionally does not purchase or use a trusted Authenticode publisher certificate. GitHub Releases therefore contain unsigned Windows EXE files. This avoids a recurring code-signing subscription and its identity-validation and account-maintenance requirements.
 
-The signing workflow uses GitHub OIDC and an Azure-managed signing key; it does not store a PFX or private key in GitHub. A valid signature identifies the publisher and protects the EXE against undetected modification. A new publisher or binary can still receive a Microsoft Defender SmartScreen reputation warning while reputation accumulates. See [CODE_SIGNING.md](CODE_SIGNING.md) for the one-time Azure/GitHub configuration.
+Windows may display an unknown-publisher or Microsoft Defender SmartScreen warning when launching the EXE. This is expected for an unsigned release; it does not by itself mean the build or self-tests failed.
+
+Each release includes `SHA256SUMS.txt`, generated from the exact EXE attached to that Release. Compare the downloaded file's SHA-256 with that digest to detect download corruption or differences. A checksum published alongside the executable does not independently prove publisher identity or authenticate the Release page. The build metadata in `BUILD-INFO.txt` explicitly records that Authenticode signing was not performed. See [CODE_SIGNING.md](CODE_SIGNING.md) for the project's code-signing decision.
 
 ## Downloading a CI build before a tagged release exists
 
@@ -40,7 +42,7 @@ The signing workflow uses GitHub OIDC and an Azure-managed signing key; it does 
 3. Open the latest successful run.
 4. Download the artifact named `7z-encrypt-tool-windows-x64-<commit>`.
 
-CI artifacts are retained for 30 days. They are not the signed release build.
+CI artifacts are retained for 30 days. Release and CI EXE files are both unsigned; the Release includes the checksum and build provenance files.
 
 ## Application behavior
 
@@ -77,7 +79,7 @@ py -3.14.10 -m venv .venv-build
 .\dist\7z-encrypt-tool.exe --self-test --self-test-output .\self-test.json
 ```
 
-The workflow also pins GitHub Actions by commit SHA, fixes `PYTHONHASHSEED`, sets `SOURCE_DATE_EPOCH` from the source commit, records the runner image and installed dependency list, and computes the published checksum after signing. See [BUILD_REPRODUCIBILITY.md](BUILD_REPRODUCIBILITY.md) for the reproducibility boundary and [CODE_SIGNING.md](CODE_SIGNING.md) for release signing configuration.
+The workflow also pins GitHub Actions by commit SHA, fixes `PYTHONHASHSEED`, sets `SOURCE_DATE_EPOCH` from the source commit, records the runner image and installed dependency list, and computes the published checksum after the self-test. See [BUILD_REPRODUCIBILITY.md](BUILD_REPRODUCIBILITY.md) for the reproducibility boundary and [CODE_SIGNING.md](CODE_SIGNING.md) for the unsigned-release decision.
 
 ## Project dependencies
 
