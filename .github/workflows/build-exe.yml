@@ -1,0 +1,121 @@
+name: Build standalone Windows EXE
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - "v*"
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build and test Windows x64 EXE
+    runs-on: windows-latest
+    permissions:
+      contents: read
+    env:
+      PYTHONUTF8: "1"
+      PYTHONIOENCODING: "utf-8"
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+
+      - name: Set up build Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.14"
+          architecture: "x64"
+          cache: "pip"
+          cache-dependency-path: |
+            requirements.txt
+            requirements-build.txt
+
+      - name: Install application and build dependencies
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt -r requirements-build.txt
+
+      - name: Compile application and tests
+        run: python -m compileall -q main.py tests pyinstaller_hooks
+
+      - name: Run source regression tests
+        run: python -m unittest discover -s tests -v
+
+      - name: Build single-file windowed EXE
+        run: python -m PyInstaller --clean --noconfirm 7z-encrypt-tool.spec
+
+      - name: Smoke-test the frozen EXE
+        shell: pwsh
+        run: |
+          $exe = Join-Path $PWD "dist\7z-encrypt-tool.exe"
+          if (-not (Test-Path $exe)) {
+            throw "PyInstaller did not produce dist\7z-encrypt-tool.exe"
+          }
+          $report = Join-Path $env:RUNNER_TEMP "7z-encrypt-self-test.json"
+          $process = Start-Process -FilePath $exe -ArgumentList @("--self-test", "--self-test-output", $report) -PassThru -Wait -WindowStyle Hidden
+          if ($process.ExitCode -ne 0) {
+            if (Test-Path $report) { Get-Content $report }
+            throw "The frozen EXE self-test failed with exit code $($process.ExitCode)."
+          }
+          if (-not (Test-Path $report)) {
+            throw "The frozen EXE did not write its self-test report."
+          }
+          Get-Content $report
+          $result = Get-Content $report -Raw | ConvertFrom-Json
+          if (-not $result.ok -or -not $result.encrypted_header -or -not $result.archive_round_trip) {
+            throw "The frozen EXE self-test report indicates a failed check."
+          }
+
+      - name: Prepare downloadable release files
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path release-assets | Out-Null
+          Copy-Item "dist\7z-encrypt-tool.exe" "release-assets\7z-encrypt-tool-windows-x64.exe"
+          $hash = (Get-FileHash "release-assets\7z-encrypt-tool-windows-x64.exe" -Algorithm SHA256).Hash.ToLower()
+          "$hash  7z-encrypt-tool-windows-x64.exe" | Set-Content "release-assets\SHA256SUMS.txt" -Encoding ascii
+          @"
+          App version: 1.1.0
+          Build Python: $(python --version)
+          PyInstaller: $(python -m PyInstaller --version)
+          Source commit: $env:GITHUB_SHA
+          "@ | Set-Content "release-assets\BUILD-INFO.txt" -Encoding utf8
+
+      - name: Upload EXE artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: 7z-encrypt-tool-windows-x64-${{ github.sha }}
+          path: release-assets/
+          if-no-files-found: error
+          retention-days: 30
+
+  release:
+    name: Publish GitHub Release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download tested Windows build
+        uses: actions/download-artifact@v7
+        with:
+          name: 7z-encrypt-tool-windows-x64-${{ github.sha }}
+          path: release-assets
+
+      - name: Attach EXE to GitHub Release
+        uses: softprops/action-gh-release@v3
+        with:
+          files: |
+            release-assets/7z-encrypt-tool-windows-x64.exe
+            release-assets/SHA256SUMS.txt
+            release-assets/BUILD-INFO.txt
+          generate_release_notes: true
