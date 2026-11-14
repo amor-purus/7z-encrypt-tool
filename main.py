@@ -397,7 +397,11 @@ def run_packaged_self_test(report_path: str | None = None) -> int:
                 bad_member = archive.testzip()
                 if bad_member is not None:
                     raise RuntimeError(f"归档完整性自检失败：{bad_member}")
-                extract_dir.mkdir()
+
+            # testzip() consumes the reader's worker state in some py7zr versions.
+            # Re-open the archive before the extraction phase instead of reusing it.
+            extract_dir.mkdir()
+            with py7zr.SevenZipFile(str(archive_path), mode="r", password=password) as archive:
                 archive.extractall(path=extract_dir)
 
             extracted = extract_dir / "smoke-test" / "smoke-test.txt"
