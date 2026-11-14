@@ -46,9 +46,12 @@
 
 八、开发者构建与测试
 在项目目录中执行：
-py -3.14 -m pip install -r requirements.txt -r requirements-build.txt
-py -3.14 -m unittest discover -s tests -v
+py -3.14.10 -m venv .venv-build
+.\.venv-build\Scripts\python.exe -m pip install --disable-pip-version-check --only-binary=:all: --upgrade "pip==26.3"
+.\.venv-build\Scripts\python.exe -m pip install --disable-pip-version-check --only-binary=:all: --no-deps -r requirements-lock.txt
+.\.venv-build\Scripts\python.exe -m pip check
+.\.venv-build\Scripts\python.exe -m unittest discover -s tests -v
 py -3.14 -m PyInstaller --clean --noconfirm 7z-encrypt-tool.spec
 打包后再执行：
 .\dist\7z-encrypt-tool.exe --self-test --self-test-output .\self-test.json
-GitHub Actions 会在 Windows x64 环境执行源码测试、生成单文件无控制台 EXE，并运行含嵌套目录和空目录的冻结 EXE 自检。
+GitHub Actions 固定 Windows Server 2025、CPython 3.14.10、pip 26.3 和完整依赖锁，并固定 Actions 提交 SHA；构建时记录 SOURCE_DATE_EPOCH、PYTHONHASHSEED 和依赖清单。正式 Release 在 Authenticode 签名验证通过后计算最终 SHA-256。详见 `BUILD_REPRODUCIBILITY.md` 和 `CODE_SIGNING.md`。
