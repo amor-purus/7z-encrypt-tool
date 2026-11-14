@@ -1,49 +1,22 @@
-# Release code signing
+# Code-signing decision
 
-## Signing design
+## Project decision
 
-Official Release artifacts are signed after the Windows build and frozen-EXE self-test, using Microsoft's managed Artifact Signing service. GitHub Actions authenticates with OpenID Connect (OIDC); no code-signing private key or PFX file is stored in the repository.
+The project owner has decided **not to purchase or use a trusted Authenticode code-signing certificate**. Official GitHub Releases are intentionally published with unsigned Windows executables.
 
-The signing job runs in the GitHub Environment named `release-signing`. It verifies the Authenticode signature before generating `SHA256SUMS.txt`. The Release job consumes only the signed-and-verified artifact. If signing is unavailable or verification fails, publication fails closed.
+This is a deliberate cost and maintenance decision, not an unfinished release prerequisite. Do not add a paid signing service, Azure Artifact Signing account, certificate profile, GitHub OIDC federation, signer role, or a required signing job unless the owner explicitly revises this decision.
 
-Pull-request, `main`, and `maintenance/*` builds are CI artifacts and remain unsigned.
+No self-signed certificate is used as a substitute. The release pipeline must remain able to publish after the Windows build and tests succeed, without any code-signing account, credentials, environment, or paid certificate.
 
-## One-time Azure setup
+## What users should expect
 
-1. Create an Azure Artifact Signing account, complete public-trust identity validation, and create a certificate profile for Authenticode code signing. Japan East is a supported region, with endpoint `https://jpe.codesigning.azure.net`. Select the endpoint that matches the region where the Artifact Signing account and certificate profile are actually created.
-2. Create an Azure app registration/service principal for the GitHub workflow.
-3. Add a federated identity credential to the app registration:
-   - Issuer: `https://token.actions.githubusercontent.com`
-   - Audience: `api://AzureADTokenExchange`
-   - Subject: `repo:yanchengz685-bot/7z-encrypt-tool:environment:release-signing`
-4. Assign the **Artifact Signing Certificate Profile Signer** role to that app registration at the certificate-profile scope (or the narrowest supported scope).
-5. In GitHub, create the `release-signing` Environment. Restrict deployment branches/tags to release refs (for example, `release/*` and `v*`). Add an approval gate only if release signing should require manual approval.
-6. Add these repository Actions **Variables**. They are configuration identifiers, not private keys:
+- Windows may show an unknown-publisher or Microsoft Defender SmartScreen warning when launching the EXE. This is expected for an unsigned release.
+- `BUILD-INFO.txt` explicitly reports `Authenticode: not signed (project decision)`.
+- `SHA256SUMS.txt` records the SHA-256 digest of the exact EXE attached to the Release. It can detect differences between a downloaded file and the published digest, but it does not establish publisher identity or independently authenticate the Release page.
+- The v1.2.0 release artifact was also unsigned. Future releases remain unsigned under this decision.
 
-| Variable | Value |
-|---|---|
-| `AZURE_CLIENT_ID` | App registration client/application ID |
-| `AZURE_TENANT_ID` | Azure tenant/directory ID |
-| `AZURE_SUBSCRIPTION_ID` | Azure subscription ID |
-| `AZURE_SIGNING_ENDPOINT` | Region endpoint matching the signing account, e.g. `https://jpe.codesigning.azure.net/` |
-| `AZURE_SIGNING_ACCOUNT` | Artifact Signing account name |
-| `AZURE_CERTIFICATE_PROFILE` | Certificate profile name |
+## Reconsidering this decision
 
-The workflow uses the Azure CLI session established by `azure/login@v3` with GitHub OIDC. The signing action is explicitly configured with `exclude-azure-cli-credential: false` and the other non-CLI credentials excluded; no client secret or exported PFX is required.
+Only revisit trusted code signing when the owner explicitly requests it and accepts the associated subscription cost, eligibility requirements, identity validation, and ongoing configuration. Any future signing implementation must remain a deliberate project change rather than an implicit release blocker.
 
-## Eligibility and SmartScreen
-
-Microsoft's current Public Trust eligibility list includes Japan for organizations; individual developers must be located in the United States or Canada. The account, identity validation, and certificate profile must be created for an applicant type that meets Microsoft's identity-validation rules. A Japan-based individual applicant should not assume that being in Japan alone makes them eligible for Public Trust; a qualifying organization may apply. Confirm the applicant's legal category before provisioning. If the owner is not eligible, use a trusted code-signing provider that supports the owner's jurisdiction and a managed/HSM-backed signing workflow; do not substitute a self-signed certificate.
-
-A valid Authenticode signature proves signer identity and file integrity. It does not guarantee that SmartScreen will immediately stop warning on a new publisher or binary; reputation is assessed separately.
-
-## Release procedure
-
-1. Configure the Azure account, certificate profile, role, GitHub OIDC federation, GitHub Environment, and six Actions Variables above.
-2. Push a release branch (for example, `release/v1.2.1`) or a `v*` tag.
-3. Confirm the `Sign and verify Windows x64 EXE` job succeeds and the release asset's `BUILD-INFO.txt` reports a valid Authenticode signature.
-4. Verify the published digest using `SHA256SUMS.txt`.
-
-Do not upload a PFX/private signing key to GitHub Actions. Microsoft's service keeps the code-signing key in its managed signing infrastructure.
-
-Official setup: [Microsoft Artifact Signing quickstart](https://learn.microsoft.com/azure/artifact-signing/quickstart) · [Azure Artifact Signing GitHub Action](https://github.com/Azure/artifact-signing-action)
+For the unsigned build and release process, see [BUILD_REPRODUCIBILITY.md](BUILD_REPRODUCIBILITY.md).
