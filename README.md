@@ -34,11 +34,11 @@ Every successful build workflow uploads a downloadable artifact:
 
 Workflow artifacts are retained for 30 days. Tagged builds (\`v*\`) are also attached to a GitHub Release automatically.
 
-## Windows SmartScreen
+## Signed releases and CI artifacts
 
-The EXE is currently not code-signed. Windows may show **Microsoft Defender SmartScreen — Windows protected your PC** or an unknown-publisher warning.
+Official tagged and `release/*` builds are published only after the Windows EXE has been signed with Microsoft Artifact Signing, its Authenticode signature has been verified, and the final SHA-256 checksum has been generated. Pull-request, `main`, and maintenance-branch Actions artifacts are CI-only builds and are not publisher-signed. The release-signing workflow uses GitHub OIDC and an Azure-managed signing key; it does not store a PFX or private key in GitHub.
 
-Only consider continuing when the file came from this repository's official Actions artifact or Release and its SHA-256 matches the supplied checksum. In the SmartScreen dialog, choose **More info** and then **Run anyway** if Windows offers that option and your organization permits it. Do not turn off SmartScreen or antivirus protection to run an unverified copy. Managed devices may block unsigned applications; in that case, ask the administrator for an approved or signed build.
+A valid signature identifies the publisher and protects the EXE against undetected modification. A new publisher or binary can still receive a Microsoft Defender SmartScreen reputation warning while reputation accumulates. See [CODE_SIGNING.md](CODE_SIGNING.md) for the one-time Azure/GitHub configuration.
 
 ## Application behavior
 
@@ -51,7 +51,9 @@ Only consider continuing when the file came from this repository's official Acti
 - Does not delete, move, or modify original files.
 - Prevents a normal window close while encryption or verification is running.
 
-The TXT stores the password in plaintext. Keep it separate from the 7z archive. Cloud-synchronized output folders may upload both files.
+## Password-record design decision
+
+The companion TXT intentionally stores the generated password as plaintext. This is an accepted product requirement, not a defect or an item for routine remediation. Do not remove, encrypt, obscure, relocate, or repeatedly flag this behavior unless the owner explicitly changes the requirement. See [Decision 0001](docs/decisions/0001-plaintext-password-companion-file.md).
 
 ## Logs
 
@@ -75,7 +77,7 @@ py -3.14 -m venv .venv-build
 .\\dist\\7z-encrypt-tool.exe --self-test --self-test-output .\\self-test.json
 \`\`\`
 
-The build workflow runs the source regression tests and a frozen-EXE self-test that creates, password-checks, verifies, and extracts an encrypted archive containing nested and empty folders.
+The build workflow runs the source regression tests and a frozen-EXE self-test that creates, password-checks, verifies, and extracts an encrypted archive containing nested and empty folders. The complete dependency lock, immutable Action references, fixed Python patch version, build provenance, and reproducibility limits are documented in [BUILD_REPRODUCIBILITY.md](BUILD_REPRODUCIBILITY.md).
 
 ## Project dependencies
 
