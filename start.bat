@@ -43,7 +43,8 @@ if errorlevel 1 (
     exit /b 1
 )
 
-for /f "delims=" %%P in ('"%BASE_PY%" -c "import sys; print(sys.base_prefix)"') do set "BASE_PREFIX=%%P"
+REM The executable's parent directory is the base installation directory; avoid nested CMD quoting in FOR /F.
+for %%I in ("%BASE_PY%") do set "BASE_PREFIX=%%~dpI"
 if not defined BASE_PREFIX (
     echo [ERROR] Could not determine the base Python installation directory.
     pause
