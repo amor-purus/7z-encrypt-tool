@@ -65,12 +65,12 @@ If the application reports an error, include this log when reporting the issue. 
 
 ## Build from source (maintainers)
 
-The application is built on GitHub Actions using Windows x64, CPython 3.14, PyInstaller, and the committed \`7z-encrypt-tool.spec\` plus \`pyinstaller_hooks/hook-py7zr.py\`.
+The application is built on Windows Server 2025 x64 using CPython 3.14.10, pip 26.3, and the complete pinned dependency set in requirements-lock.txt, with PyInstaller, and the committed \`7z-encrypt-tool.spec\` plus \`pyinstaller_hooks/hook-py7zr.py\`.
 
 To reproduce the build locally:
 
 \`\`\`powershell
-py -3.14 -m venv .venv-build
+py -3.14.10 -m venv .venv-build
 .\\.venv-build\\Scripts\\python.exe -m pip install -r requirements.txt -r requirements-build.txt
 .\\.venv-build\\Scripts\\python.exe -m unittest discover -s tests -v
 .\\.venv-build\\Scripts\\python.exe -m PyInstaller --clean --noconfirm 7z-encrypt-tool.spec
@@ -81,5 +81,6 @@ The build workflow runs the source regression tests and a frozen-EXE self-test t
 
 ## Project dependencies
 
-- Runtime: \`py7zr==1.1.4\` and its declared dependencies.
-- Build: \`PyInstaller==6.22.3\`.
+- Runtime direct dependencies: \`py7zr==1.1.4\` and \`pycryptodomex==3.24.2\`.
+- Build direct dependency: \`PyInstaller==6.22.3\`.
+- The complete pinned runtime/build set is \`requirements-lock.txt\`.
