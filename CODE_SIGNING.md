@@ -10,7 +10,7 @@ Pull-request, `main`, and `maintenance/*` builds are CI artifacts and remain uns
 
 ## One-time Azure setup
 
-1. Create an Azure Artifact Signing account, complete public-trust identity validation, and create a certificate profile for Authenticode code signing. For an account created in Japan East, use the matching endpoint `https://jpe.codesigning.azure.net/`.
+1. Create an Azure Artifact Signing account, complete public-trust identity validation, and create a certificate profile for Authenticode code signing. Japan East is a supported region, with endpoint `https://jpe.codesigning.azure.net`. Select the endpoint that matches the region where the Artifact Signing account and certificate profile are actually created.
 2. Create an Azure app registration/service principal for the GitHub workflow.
 3. Add a federated identity credential to the app registration:
    - Issuer: `https://token.actions.githubusercontent.com`
@@ -29,11 +29,11 @@ Pull-request, `main`, and `maintenance/*` builds are CI artifacts and remain uns
 | `AZURE_SIGNING_ACCOUNT` | Artifact Signing account name |
 | `AZURE_CERTIFICATE_PROFILE` | Certificate profile name |
 
-The workflow uses the Azure CLI session established by `azure/login` with GitHub OIDC; no client secret is required.
+The workflow uses the Azure CLI session established by `azure/login@v3` with GitHub OIDC. The signing action is explicitly configured with `exclude-azure-cli-credential: false` and the other non-CLI credentials excluded; no client secret or exported PFX is required.
 
 ## Eligibility and SmartScreen
 
-Microsoft's current public-trust eligibility rules list Japan as available to organizations. Individual developers must be located in the United States or Canada. Confirm the applicant's legal category before creating the account. If the owner is not eligible, use a trusted code-signing provider that supports the owner's jurisdiction and a managed/HSM-backed signing workflow; do not substitute a self-signed certificate.
+Microsoft's current Public Trust eligibility list includes Japan for organizations; individual developers must be located in the United States or Canada. The account, identity validation, and certificate profile must be created for an applicant type that meets Microsoft's identity-validation rules. A Japan-based individual applicant should not assume that being in Japan alone makes them eligible for Public Trust; a qualifying organization may apply. Confirm the applicant's legal category before provisioning. If the owner is not eligible, use a trusted code-signing provider that supports the owner's jurisdiction and a managed/HSM-backed signing workflow; do not substitute a self-signed certificate.
 
 A valid Authenticode signature proves signer identity and file integrity. It does not guarantee that SmartScreen will immediately stop warning on a new publisher or binary; reputation is assessed separately.
 
