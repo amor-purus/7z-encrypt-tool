@@ -93,11 +93,13 @@ jobs:
             throw "The frozen EXE self-test report indicates a failed check."
           }
 
-      - name: Prepare unsigned CI artifact for later release signing
+      - name: Prepare unsigned release assets and checksums
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path release-assets | Out-Null
-          Copy-Item "dist\7z-encrypt-tool.exe" "release-assets\7z-encrypt-tool-windows-x64.exe"
+          $exe = Join-Path $PWD "dist\7z-encrypt-tool.exe"
+          $releaseExe = Join-Path $PWD "release-assets\7z-encrypt-tool-windows-x64.exe"
+          Copy-Item $exe $releaseExe
           $version = (& python -c "import main; print(main.APP_VERSION)").Trim()
           if ($LASTEXITCODE -ne 0 -or -not $version) {
             throw "Could not resolve the application version."
@@ -111,109 +113,35 @@ jobs:
           Source commit: $env:GITHUB_SHA
           SOURCE_DATE_EPOCH: $env:SOURCE_DATE_EPOCH
           PYTHONHASHSEED: $env:PYTHONHASHSEED
-          Authenticode: pending release-signing job (this CI artifact is unsigned)
+          Authenticode: not signed (project decision)
           "@ | Set-Content "release-assets\BUILD-INFO.txt" -Encoding utf8
           python -m pip freeze --all | Set-Content "release-assets\DEPENDENCIES.txt" -Encoding utf8
-
-      - name: Upload tested Windows build
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
-        with:
-          name: 7z-encrypt-tool-windows-x64-${{ github.sha }}
-          path: release-assets/
-          if-no-files-found: error
-          retention-days: 30
-
-  sign:
-    name: Sign and verify Windows x64 EXE
-    if: startsWith(github.ref, 'refs/tags/v') || startsWith(github.ref, 'refs/heads/release/')
-    needs: build
-    runs-on: windows-2025
-    environment: release-signing
-    permissions:
-      actions: read
-      contents: read
-      id-token: write
-    steps:
-      - name: Download tested Windows build
-        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
-        with:
-          name: 7z-encrypt-tool-windows-x64-${{ github.sha }}
-          path: release-assets
-
-      - name: Sign in to Azure using GitHub OIDC
-        uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3
-        with:
-          client-id: ${{ vars.AZURE_CLIENT_ID }}
-          tenant-id: ${{ vars.AZURE_TENANT_ID }}
-          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
-
-      - name: Sign EXE with Microsoft Artifact Signing
-        uses: azure/artifact-signing-action@c7ab2a863ab5f9a846ddb8265964877ef296ee82 # v2
-        with:
-          endpoint: ${{ vars.AZURE_SIGNING_ENDPOINT }}
-          signing-account-name: ${{ vars.AZURE_SIGNING_ACCOUNT }}
-          certificate-profile-name: ${{ vars.AZURE_CERTIFICATE_PROFILE }}
-          files: ${{ github.workspace }}\release-assets\7z-encrypt-tool-windows-x64.exe
-          file-digest: SHA256
-          timestamp-rfc3161: http://timestamp.acs.microsoft.com
-          timestamp-digest: SHA256
-          exclude-environment-credential: true
-          exclude-workload-identity-credential: true
-          exclude-managed-identity-credential: true
-          exclude-shared-token-cache-credential: true
-          exclude-visual-studio-credential: true
-          exclude-visual-studio-code-credential: true
-          exclude-azure-powershell-credential: true
-          exclude-azure-developer-cli-credential: true
-          exclude-interactive-browser-credential: true
-          # azure/login@v3 established the OIDC session in Azure CLI; use that credential.
-          exclude-azure-cli-credential: false
-
-      - name: Verify Authenticode signature and create final checksums
-        shell: pwsh
-        run: |
-          $exe = Join-Path $PWD "release-assets\7z-encrypt-tool-windows-x64.exe"
-          $signature = Get-AuthenticodeSignature -FilePath $exe
-          if ($signature.Status -ne [System.Management.Automation.SignatureStatus]::Valid) {
-            throw "Authenticode verification failed: $($signature.Status) — $($signature.StatusMessage)"
-          }
-          if (-not $signature.SignerCertificate) {
-            throw "The signed EXE has no signer certificate."
-          }
-
-          $buildInfoPath = Join-Path $PWD "release-assets\BUILD-INFO.txt"
-          $buildInfo = Get-Content $buildInfoPath -Raw
-          $buildInfo = $buildInfo -replace 'Authenticode: .*', "Authenticode: valid — $($signature.SignerCertificate.Subject)"
-          Set-Content $buildInfoPath $buildInfo -Encoding utf8
-
-          $hash = (Get-FileHash $exe -Algorithm SHA256).Hash.ToLowerInvariant()
+          $hash = (Get-FileHash $releaseExe -Algorithm SHA256).Hash.ToLowerInvariant()
           "$hash  7z-encrypt-tool-windows-x64.exe" | Set-Content "release-assets\SHA256SUMS.txt" -Encoding ascii
-          Write-Host "Verified signer: $($signature.SignerCertificate.Subject)"
-          Write-Host "SHA-256: $hash"
+          Write-Host "Unsigned release EXE SHA-256: $hash"
 
-      - name: Upload signed release assets
+      - name: Upload tested Windows build and release assets
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
-          name: signed-release-assets-${{ github.sha }}
+          name: 7z-encrypt-tool-windows-x64-${{ github.sha }}
           path: release-assets/
           if-no-files-found: error
           retention-days: 30
 
   release:
-    name: Publish signed GitHub Release
+    name: Publish unsigned GitHub Release
     if: startsWith(github.ref, 'refs/tags/v') || startsWith(github.ref, 'refs/heads/release/')
     needs:
       - build
-      - sign
     runs-on: ubuntu-latest
     permissions:
       contents: write
       actions: read
     steps:
-      - name: Download signed and verified release assets
+      - name: Download tested unsigned release assets
         uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
         with:
-          name: signed-release-assets-${{ github.sha }}
+          name: 7z-encrypt-tool-windows-x64-${{ github.sha }}
           path: release-assets
 
       - name: Resolve release tag
@@ -231,7 +159,7 @@ jobs:
           fi
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
 
-      - name: Attach signed EXE to GitHub Release
+      - name: Attach unsigned EXE and provenance to GitHub Release
         uses: softprops/action-gh-release@8a0cd651e5b2365bd640854a3fa5dfc70e4875f3 # v3
         with:
           tag_name: ${{ steps.release_tag.outputs.tag }}

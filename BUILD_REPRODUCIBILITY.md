@@ -6,7 +6,7 @@ The canonical build lock is `requirements-lock.txt`. It pins every runtime and b
 
 All GitHub Actions are pinned to immutable commit SHAs rather than floating major-version tags. The build sets `PYTHONHASHSEED=0` and derives `SOURCE_DATE_EPOCH` from the source commit timestamp. The workflow records the runner image, interpreter, pip, PyInstaller, source commit, and complete `pip freeze --all` output in the build artifacts.
 
-The release SHA-256 is calculated only after Microsoft Artifact Signing has modified and verified the EXE, so the published checksum describes the exact downloadable binary.
+The release SHA-256 is calculated after the frozen-EXE self-test, against the exact unsigned EXE copied into the release-assets directory. The published checksum therefore describes the exact downloadable binary; it is an integrity check, not proof of publisher identity.
 
 ## Rebuild
 

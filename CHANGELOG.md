@@ -3,9 +3,10 @@
 ## Unreleased — build integrity and maintenance
 
 - Recorded plaintext companion-password storage as an accepted product design decision; routine reviews must not reopen it.
-- Added Microsoft Artifact Signing through GitHub OIDC and a protected release environment; release publication now requires a verified Authenticode signature.
+- Recorded the owner's decision not to purchase trusted code signing; GitHub Releases intentionally publish unsigned EXE files without a paid signing dependency.
+- Removed the Azure Artifact Signing/OIDC release gate; release publication now follows successful build, regression tests, frozen-EXE self-test, and SHA-256 generation.
 - Pinned GitHub Actions by commit SHA, the Windows runner generation, CPython patch version, pip, and all runtime/build dependency versions.
-- Added deterministic Python hash/timestamp inputs and build/dependency provenance; the final SHA-256 is generated after signing.
+- Added deterministic Python hash/timestamp inputs and build/dependency provenance; the final SHA-256 is generated after the frozen-EXE self-test.
 
 ## v1.2.0 — 2026-11-14
 
