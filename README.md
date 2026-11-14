@@ -32,7 +32,7 @@ Run the standard-library tests from the project folder:
 .venv314\Scripts\python.exe -m unittest discover -s tests -v
 ```
 
-The tests cover Windows-style archive-name conflicts, preservation of unique filenames, symbolic-link aliases, and hard-link deduplication where supported.
+The tests cover Windows-style archive-name conflicts, preservation of unique filenames, symbolic-link aliases, hard-link deduplication where supported, and a real encrypted-archive extraction round trip.
 
 ## Verification boundary
 The repository includes automated tests for archive naming and file deduplication. Real 7z encryption, decryption with an independent 7-Zip client, GUI behavior, and launcher behavior still need an end-to-end test on Windows using non-sensitive sample files.
