@@ -44,7 +44,7 @@
 1. 先记下自己刚才做了什么，以及程序出现了什么现象。
 2. 如果出现错误弹窗，直接截屏发给维护者。
 3. 如果需要提供详细日志，按键盘上的 Win + R，在弹出的“运行”窗口中粘贴下面这一行，然后按 Enter：
-   `%LOCALAPPDATA%\\7z-Encrypt-Tool\\logs`
+   `%LOCALAPPDATA%\7z-Encrypt-Tool\logs`
 4. 在打开的文件夹中找到 `application.log`，把这个文件作为聊天附件发送即可。无需自己阅读或分析日志。
 5. 日志可能包含本机文件路径。发送前可先检查是否有不希望分享的路径；不方便提供日志时，先发送错误弹窗截图即可。
 
@@ -54,11 +54,11 @@
 普通用户不需要执行本节命令。项目维护者可在 Windows 环境中使用以下命令进行本地构建和测试：
 ```powershell
 py -3.14.10 -m venv .venv-build
-.\\.venv-build\\Scripts\\python.exe -m pip install --disable-pip-version-check --only-binary=:all: --upgrade "pip==26.3"
-.\\.venv-build\\Scripts\\python.exe -m pip install --disable-pip-version-check --only-binary=:all: --no-deps -r requirements-lock.txt
-.\\.venv-build\\Scripts\\python.exe -m pip check
-.\\.venv-build\\Scripts\\python.exe -m unittest discover -s tests -v
-.\\.venv-build\\Scripts\\python.exe -m PyInstaller --clean --noconfirm 7z-encrypt-tool.spec
-.\\dist\\7z-encrypt-tool.exe --self-test --self-test-output .\\self-test.json
+.\.venv-build\Scripts\python.exe -m pip install --disable-pip-version-check --only-binary=:all: --upgrade "pip==26.3"
+.\.venv-build\Scripts\python.exe -m pip install --disable-pip-version-check --only-binary=:all: --no-deps -r requirements-lock.txt
+.\.venv-build\Scripts\python.exe -m pip check
+.\.venv-build\Scripts\python.exe -m unittest discover -s tests -v
+.\.venv-build\Scripts\python.exe -m PyInstaller --clean --noconfirm 7z-encrypt-tool.spec
+.\dist\7z-encrypt-tool.exe --self-test --self-test-output .\self-test.json
 ```
 GitHub Actions 自动执行依赖安装、源码回归测试、Windows x64 EXE 打包、冻结 EXE 自检，并生成 SHA-256 与构建记录。发布不需要代码签名账户或证书。详情见 `BUILD_REPRODUCIBILITY.md` 和 `CODE_SIGNING.md`。
