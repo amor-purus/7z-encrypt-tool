@@ -77,7 +77,7 @@ if not exist "%PYTHON_EXE%" (
 
 echo.
 echo Verifying the private runtime:
-"%PYTHON_EXE%" -c "import pathlib,sys,struct; base=pathlib.Path(sys.argv[1]).resolve(); env=pathlib.Path(sys.argv[2]).resolve(); print('Private runtime:',sys.version); print('Executable:',sys.executable); print('Architecture:',struct.calcsize('P')*8,'bit'); ok=sys.implementation.name == 'cpython' and sys.version_info[:2] == (3,14) and struct.calcsize('P') == 8 and sys.prefix != sys.base_prefix and pathlib.Path(sys.prefix).resolve() == env and pathlib.Path(sys.base_prefix).resolve() == base; sys.exit(0 if ok else 1)" "%BASE_PY%" "%VENV%"
+"%PYTHON_EXE%" -c "import pathlib,sys,struct; base=pathlib.Path(sys.argv[1]).resolve().parent; env=pathlib.Path(sys.argv[2]).resolve(); print('Private runtime:',sys.version); print('Executable:',sys.executable); print('Architecture:',struct.calcsize('P')*8,'bit'); ok=sys.implementation.name == 'cpython' and sys.version_info[:2] == (3,14) and struct.calcsize('P') == 8 and sys.prefix != sys.base_prefix and pathlib.Path(sys.prefix).resolve() == env and pathlib.Path(sys.base_prefix).resolve() == base; sys.exit(0 if ok else 1)" "%BASE_PY%" "%VENV%"
 if errorlevel 1 (
     echo [ERROR] Private runtime verification failed. No dependency installation was attempted.
     pause
