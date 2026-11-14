@@ -166,6 +166,8 @@ jobs:
           exclude-azure-powershell-credential: true
           exclude-azure-developer-cli-credential: true
           exclude-interactive-browser-credential: true
+          # azure/login@v3 established the OIDC session in Azure CLI; use that credential.
+          exclude-azure-cli-credential: false
 
       - name: Verify Authenticode signature and create final checksums
         shell: pwsh
