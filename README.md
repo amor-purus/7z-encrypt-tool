@@ -1,15 +1,27 @@
-# 7z File Encryption Tool v1.1.0
+# 7z File Encryption Tool v1.2.0
 
-A standalone Windows 11 GUI application for creating AES-256 encrypted 7z archives.
+A standalone Windows 11 GUI application for creating AES-256 encrypted 7z archives from files, folders, or a mixed selection.
 
 ## Download and run
 
-1. Open the repository's **Releases** page and download `7z-encrypt-tool-windows-x64.exe`.
-2. Optionally verify the SHA-256 checksum against `SHA256SUMS.txt`.
+1. Open the repository's **Releases** page and download \`7z-encrypt-tool-windows-x64.exe\`.
+2. Optionally verify the SHA-256 checksum against \`SHA256SUMS.txt\`.
 3. Double-click the EXE. No Python installation, BAT launcher, virtual environment, pip, or administrator rights are required.
-4. Select the files, choose an output folder, and wait for compression and integrity verification to finish.
+4. Add files and/or folders to the queue, then click **Start encryption** and choose an output folder.
+5. Wait for compression and integrity verification to finish.
 
 The EXE is a single-file, windowed PyInstaller build. It does not open a persistent console window. The first launch can take a little longer because PyInstaller extracts its bundled runtime to a temporary directory.
+
+## Selecting files and folders
+
+- **Add files** opens the native multi-select file picker; select one or more files at once.
+- **Add folder** adds one folder. Click it again to add more folders.
+- **Remove selected** removes the highlighted queue entries. **Clear** empties the queue.
+- The queue can contain only folders or a mixture of files and folders.
+- Selecting a parent folder automatically subsumes any separately selected files or subfolders inside it, preventing duplicate packaging.
+- The output folder must be outside every selected source folder. The application blocks an output folder that is the source itself or one of its descendants, avoiding recursive inclusion of the archive being written.
+
+Each selected folder is stored under a top-level archive path and includes its nested directories, files, and empty directories. Conflicting names are disambiguated using parent-folder names or a numeric suffix. The companion TXT identifies each entry as a file or folder and records its exact path inside the archive.
 
 ## Downloading a build before a tagged release exists
 
@@ -18,9 +30,9 @@ Every successful build workflow uploads a downloadable artifact:
 1. Open the repository's **Actions** tab.
 2. Select **Build standalone Windows EXE**.
 3. Open the latest successful run.
-4. Download the artifact named `7z-encrypt-tool-windows-x64-<commit>`.
+4. Download the artifact named \`7z-encrypt-tool-windows-x64-<commit>\`.
 
-Workflow artifacts are retained for 30 days. Tagged builds (`v*`) are also attached to a GitHub Release automatically.
+Workflow artifacts are retained for 30 days. Tagged builds (\`v*\`) are also attached to a GitHub Release automatically.
 
 ## Windows SmartScreen
 
@@ -32,9 +44,10 @@ Only consider continuing when the file came from this repository's official Acti
 
 - Creates standard 7z archives with AES-256 encryption and encrypted headers (member names are hidden).
 - Generates a random 32-character password and a random 10-character archive name.
-- Writes a companion TXT file containing the password and original-to-archive filename mapping.
+- Writes a companion TXT containing the password and original-to-archive path mappings, labeling folders as \`[文件夹]\`.
 - Detects duplicate selections, symbolic-link aliases, and filesystem hard links where file identity is available.
-- Validates that member names cannot be read without the password, compares the complete archive member list, and checks archive integrity.
+- Preserves nested folders and empty directories and verifies the complete expected archive member set.
+- Confirms that member names cannot be read without the password and runs the archive integrity check.
 - Does not delete, move, or modify original files.
 - Prevents a normal window close while encryption or verification is running.
 
@@ -44,29 +57,27 @@ The TXT stores the password in plaintext. Keep it separate from the 7z archive. 
 
 Application logs are written to:
 
-`%LOCALAPPDATA%\7z-Encrypt-Tool\logs\application.log`
+\`%LOCALAPPDATA%\\7z-Encrypt-Tool\\logs\\application.log\`
 
 If the application reports an error, include this log when reporting the issue. It may contain local file paths; review it before sharing.
 
 ## Build from source (maintainers)
 
-The application is built on GitHub Actions using Windows x64, CPython 3.14, PyInstaller, and the committed `7z-encrypt-tool.spec` plus `pyinstaller_hooks/hook-py7zr.py`.
+The application is built on GitHub Actions using Windows x64, CPython 3.14, PyInstaller, and the committed \`7z-encrypt-tool.spec\` plus \`pyinstaller_hooks/hook-py7zr.py\`.
 
 To reproduce the build locally:
 
-```powershell
+\`\`\`powershell
 py -3.14 -m venv .venv-build
-.\.venv-build\Scripts\python.exe -m pip install -r requirements.txt -r requirements-build.txt
-.\.venv-build\Scripts\python.exe -m unittest discover -s tests -v
-.\.venv-build\Scripts\python.exe -m PyInstaller --clean --noconfirm 7z-encrypt-tool.spec
-.\dist\7z-encrypt-tool.exe --self-test --self-test-output .\self-test.json
-```
+.\\.venv-build\\Scripts\\python.exe -m pip install -r requirements.txt -r requirements-build.txt
+.\\.venv-build\\Scripts\\python.exe -m unittest discover -s tests -v
+.\\.venv-build\\Scripts\\python.exe -m PyInstaller --clean --noconfirm 7z-encrypt-tool.spec
+.\\dist\\7z-encrypt-tool.exe --self-test --self-test-output .\\self-test.json
+\`\`\`
 
-The build workflow also runs the frozen EXE self-test. It checks the bundled imports and distribution metadata, then creates, password-checks, verifies, and extracts a real encrypted 7z archive.
+The build workflow runs the source regression tests and a frozen-EXE self-test that creates, password-checks, verifies, and extracts an encrypted archive containing nested and empty folders.
 
 ## Project dependencies
 
-- Runtime: `py7zr==1.1.4` and its declared dependencies.
-- Build: `PyInstaller==6.22.3`.
-
-The PyInstaller hook collects py7zr submodules and the runtime codec packages, their native Windows extension binaries, and distribution metadata. The final application is built in windowed one-file mode.
+- Runtime: \`py7zr==1.1.4\` and its declared dependencies.
+- Build: \`PyInstaller==6.22.3\`.
