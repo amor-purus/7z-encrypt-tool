@@ -1,16 +1,24 @@
 # -*- coding: utf-8 -*-
-"""7z 文件加密工具（Windows 11）。
+"""7z 文件加密工具。
 
-由 start.bat 创建独立虚拟环境；只对源文件进行读取，不修改或删除源文件。
+发布版通过 PyInstaller 制作为 Windows 独立 GUI EXE。
+普通用户无需安装 Python、pip、虚拟环境或命令行启动器。
 """
 from __future__ import annotations
 
+import ctypes
+import json
 import logging
 import os
+import platform
 import secrets
 import string
+import sys
+import tempfile
 import threading
+import traceback
 import unicodedata
+from importlib import metadata
 from pathlib import Path
 from typing import Callable
 
@@ -18,8 +26,63 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
 APP_TITLE = "文件加密工具"
+APP_VERSION = "1.1.0"
 PASSWORD_LENGTH = 32
 ARCHIVE_NAME_LENGTH = 10
+
+
+def app_data_dir() -> Path:
+    """返回当前用户可写的应用数据目录。"""
+    base = Path(os.environ.get("LOCALAPPDATA") or (Path.home() / "AppData" / "Local"))
+    path = base / "7z-Encrypt-Tool"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def configure_logging() -> Path | None:
+    """GUI 版没有控制台，所有异常写入用户日志目录。"""
+    try:
+        log_dir = app_data_dir() / "logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        log_file = log_dir / "application.log"
+        logging.basicConfig(
+            filename=log_file,
+            level=logging.INFO,
+            format="%(asctime)s %(levelname)s %(threadName)s %(message)s",
+            encoding="utf-8",
+            force=True,
+        )
+        logging.info("Application started: version=%s frozen=%s", APP_VERSION, bool(getattr(sys, "frozen", False)))
+        return log_file
+    except OSError:
+        logging.basicConfig(
+            level=logging.ERROR,
+            format="%(asctime)s %(levelname)s %(threadName)s %(message)s",
+            force=True,
+        )
+        logging.exception("Could not initialize the application log file")
+        return None
+
+
+def enable_windows_dpi_awareness() -> None:
+    """尽可能启用 Windows Per-Monitor V2 DPI 感知，失败时回退且不阻止启动。"""
+    if os.name != "nt":
+        return
+    try:
+        user32 = ctypes.windll.user32
+        if user32.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4)):
+            return
+    except (AttributeError, OSError):
+        pass
+    try:
+        ctypes.windll.shcore.SetProcessDpiAwareness(2)
+        return
+    except (AttributeError, OSError):
+        pass
+    try:
+        ctypes.windll.user32.SetProcessDPIAware()
+    except (AttributeError, OSError):
+        logging.exception("Could not enable Windows DPI awareness")
 
 
 def make_password(length: int = PASSWORD_LENGTH) -> str:
@@ -59,8 +122,7 @@ def _archive_key(name: str) -> tuple[str, ...]:
 def make_archive_names(files: list[Path]) -> list[str]:
     """生成相互不冲突的归档路径，并优先保留所有唯一的原始文件名。
 
-    先为唯一叶子名称预留根目录位置，再为重名文件逐层补充父目录；
-    这样前面的重名文件不会抢占后面唯一文件的名称。
+    唯一叶子名称先占位；重名文件再逐层补充父目录，最后才使用数字后缀。
     """
     if not files:
         return []
@@ -78,7 +140,6 @@ def make_archive_names(files: list[Path]) -> list[str]:
         key = _archive_key(candidate)
         if not key or key in used_files or key in used_dirs:
             return True
-        # 不能把已经存在的文件当作目录使用。
         return any(key[:index] in used_files for index in range(1, len(key)))
 
     def reserve(candidate: str) -> None:
@@ -89,7 +150,7 @@ def make_archive_names(files: list[Path]) -> list[str]:
         for index in range(1, len(key)):
             used_dirs.add(key[:index])
 
-    # 唯一文件名先占位，避免稍后的重名文件把它用作目录或数字后缀。
+    # 先保护所有唯一叶子名称，避免后续重复项抢占它们。
     for index, path in enumerate(files):
         if counts[leaf_keys[index]] == 1:
             candidate = path.name
@@ -98,7 +159,6 @@ def make_archive_names(files: list[Path]) -> list[str]:
             reserve(candidate)
             result[index] = candidate
 
-    # 重名文件从最近父目录开始逐层补充路径。
     for index, path in enumerate(files):
         if result[index] is not None:
             continue
@@ -114,7 +174,7 @@ def make_archive_names(files: list[Path]) -> list[str]:
                 break
             current = current.parent
 
-        # 盘符根目录没有父目录名称；把盘符作为普通首级目录保留下来。
+        # 路径退到盘符根目录时，保留盘符以区分不同卷。
         if candidate is None and path.drive:
             drive_label = path.drive.replace("\\", "/").strip("/").rstrip(":")
             drive_parts = [part for part in drive_label.split("/") if part]
@@ -123,7 +183,6 @@ def make_archive_names(files: list[Path]) -> list[str]:
                 if not conflicts(trial):
                     candidate = trial
 
-        # 极端情况下父路径仍不能唯一化，使用未被预留的数字后缀。
         if candidate is None:
             stem, suffix = path.stem, path.suffix
             number = 2
@@ -141,7 +200,7 @@ def make_archive_names(files: list[Path]) -> list[str]:
 
 
 def deduplicate_files(items: list[str | Path]) -> list[Path]:
-    """按解析路径及文件身份去重，覆盖符号链接和硬链接等常见情况。"""
+    """按解析路径及文件身份去重，覆盖符号链接和可识别的硬链接。"""
     paths: list[Path] = []
     seen_paths: set[str] = set()
     seen_file_ids: set[tuple[int, int]] = set()
@@ -185,10 +244,7 @@ def create_encrypted_bundle(
     try:
         import py7zr
     except ImportError as exc:
-        raise RuntimeError(
-            "缺少加密组件。请关闭工具后，双击 start.bat，并确保电脑已连接互联网，"
-            "让启动器自动安装所需组件。"
-        ) from exc
+        raise RuntimeError("加密组件缺失，请重新下载完整的官方 EXE 版本。") from exc
 
     paths = deduplicate_files(files)
     if not paths:
@@ -207,8 +263,7 @@ def create_encrypted_bundle(
     password = make_password()
 
     try:
-        _notify_progress(progress_callback, "正在压缩文件，请不要关闭工具……")
-        # 7z AES-256；加密头部会隐藏文件名、目录名和相关头部信息。
+        _notify_progress(progress_callback, "正在加密打包，请不要关闭工具……")
         with py7zr.SevenZipFile(str(temp_archive), mode="w", password=password) as archive:
             archive.set_encrypted_header(True)
             for source, archive_name in zip(paths, archive_names):
@@ -217,8 +272,7 @@ def create_encrypted_bundle(
         if not temp_archive.exists() or temp_archive.stat().st_size == 0:
             raise RuntimeError("压缩组件没有生成有效的 7z 文件。")
 
-        _notify_progress(progress_callback, "正在验证密码保护和压缩包完整性……")
-        # 无密码时必须无法读取归档头；否则说明文件名加密没有生效。
+        _notify_progress(progress_callback, "正在校验文件头加密和压缩包完整性……")
         try:
             with py7zr.SevenZipFile(str(temp_archive), mode="r", password=None) as no_password:
                 no_password.getnames()
@@ -227,7 +281,6 @@ def create_encrypted_bundle(
         else:
             raise RuntimeError("安全校验失败：压缩包文件名没有成功加密。")
 
-        # 使用正确密码重新读取；逐项核对成员名并执行 CRC 完整性检查。
         with py7zr.SevenZipFile(str(temp_archive), mode="r", password=password) as check:
             names = check.getnames()
             if len(names) != len(archive_names) or sorted(names) != sorted(archive_names):
@@ -236,7 +289,6 @@ def create_encrypted_bundle(
             if bad_member is not None:
                 raise RuntimeError(f"压缩包完整性检查失败：{bad_member}")
 
-        # TXT 记录原始文件名与归档内路径的对应关系，便于之后找回文件。
         mappings = "\n".join(
             f"- {source.name} -> {archive_name}"
             for source, archive_name in zip(paths, archive_names)
@@ -255,7 +307,7 @@ def create_encrypted_bundle(
         if final_archive.exists() or final_txt.exists():
             raise FileExistsError("输出目录中出现同名文件，请重新执行。")
 
-        # 先发布密码记录，再发布压缩包。这样不会出现已发布的 7z 没有密码 TXT。
+        # 先发布 TXT，再发布 7z；失败时回滚 TXT，避免孤立的正式加密包。
         os.rename(temp_txt, final_txt)
         try:
             os.rename(temp_archive, final_archive)
@@ -268,7 +320,6 @@ def create_encrypted_bundle(
 
         return str(final_archive), str(final_txt)
     finally:
-        # 清理失败不能覆盖压缩、校验或发布阶段的原始异常。
         for temporary_path in (temp_archive, temp_txt):
             try:
                 temporary_path.unlink(missing_ok=True)
@@ -276,13 +327,123 @@ def create_encrypted_bundle(
                 logging.warning("无法清理临时文件：%s", temporary_path, exc_info=True)
 
 
+def run_packaged_self_test(report_path: str | None = None) -> int:
+    """由 CI 直接运行打包后的 EXE，检查隐藏导入、元数据和真实加密往返。"""
+    report: dict[str, object] = {
+        "app_version": APP_VERSION,
+        "python_version": platform.python_version(),
+        "frozen": bool(getattr(sys, "frozen", False)),
+    }
+
+    try:
+        import py7zr
+        import bcj
+        import brotli
+        import inflate64
+        import multivolumefile
+        import psutil
+        import pyppmd
+        import texttable
+        from Cryptodome.Cipher import AES
+
+        modules = {
+            "py7zr": py7zr,
+            "pybcj": bcj,
+            "brotli": brotli,
+            "inflate64": inflate64,
+            "multivolumefile": multivolumefile,
+            "psutil": psutil,
+            "pyppmd": pyppmd,
+            "texttable": texttable,
+            "pycryptodomex": AES,
+        }
+        package_names = (
+            "py7zr",
+            "pycryptodomex",
+            "pyppmd",
+            "pybcj",
+            "brotli",
+            "inflate64",
+            "multivolumefile",
+            "psutil",
+            "texttable",
+        )
+        versions = {name: metadata.version(name) for name in package_names}
+
+        with tempfile.TemporaryDirectory(prefix="7z-encrypt-selftest-") as temp:
+            root = Path(temp)
+            source = root / "smoke-test.txt"
+            archive_path = root / "smoke-test.7z"
+            extract_dir = root / "extracted"
+            source.write_bytes(b"7z encryption tool packaged self-test\n")
+            password = "SelfTest-" + secrets.token_urlsafe(24)
+
+            with py7zr.SevenZipFile(str(archive_path), mode="w", password=password) as archive:
+                archive.set_encrypted_header(True)
+                archive.write(str(source), arcname="smoke-test/smoke-test.txt")
+
+            try:
+                with py7zr.SevenZipFile(str(archive_path), mode="r", password=None) as archive:
+                    archive.getnames()
+            except py7zr.PasswordRequired:
+                header_encryption_verified = True
+            else:
+                raise RuntimeError("无密码仍能读取归档文件名，文件头加密自检失败。")
+
+            with py7zr.SevenZipFile(str(archive_path), mode="r", password=password) as archive:
+                names = archive.getnames()
+                if names != ["smoke-test/smoke-test.txt"]:
+                    raise RuntimeError(f"归档成员名称异常：{names!r}")
+                bad_member = archive.testzip()
+                if bad_member is not None:
+                    raise RuntimeError(f"归档完整性自检失败：{bad_member}")
+                extract_dir.mkdir()
+                archive.extractall(path=extract_dir)
+
+            extracted = extract_dir / "smoke-test" / "smoke-test.txt"
+            if not extracted.is_file() or extracted.read_bytes() != source.read_bytes():
+                raise RuntimeError("加密归档解压后的内容与原文件不一致。")
+
+        report.update(
+            {
+                "ok": True,
+                "dependencies": versions,
+                "hidden_imports": sorted(modules),
+                "encrypted_header": header_encryption_verified,
+                "archive_round_trip": True,
+            }
+        )
+        exit_code = 0
+    except Exception as exc:
+        report.update(
+            {
+                "ok": False,
+                "error": str(exc) or type(exc).__name__,
+                "traceback": traceback.format_exc(),
+            }
+        )
+        logging.exception("Packaged self-test failed")
+        exit_code = 1
+
+    if report_path:
+        try:
+            target = Path(report_path)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+        except OSError:
+            logging.exception("Could not write packaged self-test report")
+            return 1
+    return exit_code
+
+
 class EncryptApp:
     def __init__(self, root: tk.Tk):
         self.root = root
         self.is_busy = False
-        root.title(APP_TITLE)
-        root.geometry("580x330")
-        root.minsize(520, 300)
+        root.title(f"{APP_TITLE} v{APP_VERSION}")
+        root.geometry("600x360")
+        root.minsize(540, 320)
+        root.resizable(True, True)
         root.protocol("WM_DELETE_WINDOW", self.on_close)
         root.report_callback_exception = self.report_callback_exception
 
@@ -293,7 +454,7 @@ class EncryptApp:
         ttk.Label(
             frame,
             text="选择一个或多个文件，再选择输出文件夹。工具会生成加密压缩包和密码记录。",
-            wraplength=500,
+            wraplength=520,
             justify="left",
         ).pack(anchor="w", pady=(12, 20))
 
@@ -301,24 +462,21 @@ class EncryptApp:
         self.choose_button.pack(anchor="w", ipadx=12, ipady=7)
 
         self.status_var = tk.StringVar(value="尚未选择文件")
-        ttk.Label(frame, textvariable=self.status_var, wraplength=500).pack(anchor="w", pady=(18, 8))
+        ttk.Label(frame, textvariable=self.status_var, wraplength=520).pack(anchor="w", pady=(18, 8))
 
-        self.progress = ttk.Progressbar(frame, mode="indeterminate", length=500)
+        self.progress = ttk.Progressbar(frame, mode="indeterminate", length=520)
         self.progress.pack(anchor="w", pady=(4, 12), fill="x")
 
         ttk.Label(
             frame,
             text="密码会写入输出文件夹中的 TXT。请妥善保管，不要与压缩包一起发送给不该知道密码的人。",
-            wraplength=500,
+            wraplength=520,
             foreground="#555555",
             justify="left",
         ).pack(anchor="w", side="bottom")
 
-    def report_callback_exception(self, exc_type, exc_value, traceback) -> None:
-        logging.error(
-            "Tkinter 回调异常",
-            exc_info=(exc_type, exc_value, traceback),
-        )
+    def report_callback_exception(self, exc_type, exc_value, trace) -> None:
+        logging.error("Tkinter 回调异常", exc_info=(exc_type, exc_value, trace))
         detail = str(exc_value) or exc_type.__name__
         messagebox.showerror("程序错误", detail, parent=self.root)
 
@@ -362,8 +520,7 @@ class EncryptApp:
                 except tk.TclError:
                     logging.exception("无法向窗口报告加密失败")
 
-        # 非守护线程避免 GUI 的主循环异常退出时悄悄中断文件处理。
-        threading.Thread(target=worker, daemon=False).start()
+        threading.Thread(target=worker, daemon=False, name="archive-worker").start()
 
     def _finish_task(self) -> None:
         self.is_busy = False
@@ -384,21 +541,39 @@ class EncryptApp:
     def finish_error(self, detail: str) -> None:
         self._finish_task()
         self.status_var.set("处理失败，原文件未被修改。")
-        messagebox.showerror("处理失败", detail, parent=self.root)
+        log_hint = f"\n\n详细日志：{app_data_dir() / 'logs' / 'application.log'}"
+        messagebox.showerror("处理失败", detail + log_hint, parent=self.root)
 
     def on_close(self) -> None:
         if self.is_busy:
             messagebox.showwarning(
                 "正在处理",
-                "文件正在压缩或校验，请等待当前任务完成后再关闭窗口。",
+                "文件正在加密打包或校验完整性，请等待当前任务完成后再关闭窗口。",
                 parent=self.root,
             )
             return
         self.root.destroy()
 
 
-def main() -> None:
+def main() -> int:
+    log_file = configure_logging()
+
+    if "--version" in sys.argv:
+        print(APP_VERSION)
+        return 0
+
+    if "--self-test" in sys.argv:
+        report_path: str | None = None
+        if "--self-test-output" in sys.argv:
+            try:
+                index = sys.argv.index("--self-test-output")
+                report_path = sys.argv[index + 1]
+            except (ValueError, IndexError):
+                return 2
+        return run_packaged_self_test(report_path)
+
     try:
+        enable_windows_dpi_awareness()
         root = tk.Tk()
         try:
             ttk.Style(root).theme_use("vista")
@@ -406,14 +581,17 @@ def main() -> None:
             pass
         EncryptApp(root)
         root.mainloop()
+        return 0
     except Exception as exc:
         logging.exception("应用程序启动失败")
         detail = str(exc) or type(exc).__name__
+        log_hint = f"\n\n详细日志：{log_file}" if log_file else ""
         try:
-            messagebox.showerror("程序启动失败", detail)
+            messagebox.showerror("程序启动失败", detail + log_hint)
         except Exception:
             logging.exception("无法显示启动错误")
+        return 1
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
