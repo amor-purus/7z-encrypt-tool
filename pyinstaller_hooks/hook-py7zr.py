@@ -35,7 +35,7 @@ def collect_module(module_name: str, *, required: bool = True) -> bool:
     if module_spec.submodule_search_locations is not None:
         package_datas, package_binaries, package_hiddenimports = collect_all(
             module_name,
-            on_error="raise",
+            on_error="warn once",
         )
         datas += package_datas
         binaries += package_binaries
