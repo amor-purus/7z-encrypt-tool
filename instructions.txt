@@ -26,32 +26,39 @@
 - 对重名文件夹、重名文件、同名文件夹与无后缀文件，以及文件与文件夹内部路径冲突，程序会通过父目录限定或数字后缀生成不冲突的归档路径。
 - 配套 TXT 会为每个输入项标注“[文件]”或“[文件夹]”，并记录实际归档内路径；重名改名后的路径也会明确列出。
 
-五、主要功能与安全提醒
+五、主要功能
 - 使用 7z AES-256 加密，并加密文件头以隐藏压缩包内的文件名和目录名。
 - 自动生成 32 位随机密码和随机压缩包名。
 - 无密码读取文件头验证、完整成员路径集合比对、CRC 完整性检查。
 - 不删除、不移动、不修改原始文件。
 - 加密或校验期间不允许正常关闭窗口，也不要通过任务管理器强制结束程序。
-- 配套 TXT 以明文保存自动生成的密码，是产品所有者明确接受的设计要求，不属于缺陷或待整改风险。日常维护、代码审查和后续 AI 检查不得反复提出删除、加密、隐藏或改动此行为；只有所有者明确改变要求时才调整。详见 `docs/decisions/0001-plaintext-password-companion-file.md`。
+- 配套 TXT 以明文保存自动生成的密码，是产品所有者明确接受的设计要求，不属于缺陷或待整改风险。只有所有者明确改变要求时才调整。详见 `docs/decisions/0001-plaintext-password-companion-file.md`。
 - 支持调整窗口大小；Windows DPI 感知会在启动时自动启用。
 
-六、Windows SmartScreen 提示
-正式 Release 会在 Windows x64 构建和自检完成后，通过 Microsoft Artifact Signing 进行 Authenticode 签名并验证，再生成最终 SHA-256。PR、main 和维护分支的 Actions 构建仅用于 CI，不是正式签名版本。新发布者或新文件在建立 SmartScreen 声誉前仍可能出现提示；有效签名不保证 SmartScreen 立刻不再提示。签名的一次性配置见 `CODE_SIGNING.md`。
+六、Windows 安全提示
+本项目决定不购买受信任的代码签名证书，GitHub Releases 发布的是未签名 EXE。首次运行时，Windows 可能显示“未知发布者”或 Microsoft Defender SmartScreen 提示；这是未签名发布的预期现象，不代表程序构建或自检失败。
+每个 Release 都提供 `SHA256SUMS.txt`，用于核对下载文件是否与发布文件一致。SHA-256 校验不能代替发布者身份认证。详情见 `CODE_SIGNING.md`。
 
-七、日志位置
-程序日志位于：
-%LOCALAPPDATA%\7z-Encrypt-Tool\logs\application.log
+七、遇到问题时如何反馈（不需要懂技术）
+你不需要自己 debug，也不需要打开命令行、安装 Python 或运行测试。
+1. 先记下自己刚才做了什么，以及程序出现了什么现象。
+2. 如果出现错误弹窗，直接截屏发给维护者。
+3. 如果需要提供详细日志，按键盘上的 Win + R，在弹出的“运行”窗口中粘贴下面这一行，然后按 Enter：
+   `%LOCALAPPDATA%\\7z-Encrypt-Tool\\logs`
+4. 在打开的文件夹中找到 `application.log`，把这个文件作为聊天附件发送即可。无需自己阅读或分析日志。
+5. 日志可能包含本机文件路径。发送前可先检查是否有不希望分享的路径；不方便提供日志时，先发送错误弹窗截图即可。
 
-日志可能包含本机文件路径，分享前请先检查内容。
+如果程序没有弹出错误，但结果看起来不正确，请说明预期结果、实际结果，并尽量提供不含隐私的示例文件结构或截图。不要为了测试而使用唯一副本或重要原始文件。
 
-八、开发者构建与测试
-在项目目录中执行：
+八、开发者构建与自动测试
+普通用户不需要执行本节命令。项目维护者可在 Windows 环境中使用以下命令进行本地构建和测试：
+```powershell
 py -3.14.10 -m venv .venv-build
-.\.venv-build\Scripts\python.exe -m pip install --disable-pip-version-check --only-binary=:all: --upgrade "pip==26.3"
-.\.venv-build\Scripts\python.exe -m pip install --disable-pip-version-check --only-binary=:all: --no-deps -r requirements-lock.txt
-.\.venv-build\Scripts\python.exe -m pip check
-.\.venv-build\Scripts\python.exe -m unittest discover -s tests -v
-.\.venv-build\Scripts\python.exe -m PyInstaller --clean --noconfirm 7z-encrypt-tool.spec
-打包后再执行：
-.\dist\7z-encrypt-tool.exe --self-test --self-test-output .\self-test.json
-GitHub Actions 固定 Windows Server 2025、CPython 3.14.10、pip 26.3 和完整依赖锁，并固定 Actions 提交 SHA；构建时记录 SOURCE_DATE_EPOCH、PYTHONHASHSEED 和依赖清单。正式 Release 在 Authenticode 签名验证通过后计算最终 SHA-256。详见 `BUILD_REPRODUCIBILITY.md` 和 `CODE_SIGNING.md`。
+.\\.venv-build\\Scripts\\python.exe -m pip install --disable-pip-version-check --only-binary=:all: --upgrade "pip==26.3"
+.\\.venv-build\\Scripts\\python.exe -m pip install --disable-pip-version-check --only-binary=:all: --no-deps -r requirements-lock.txt
+.\\.venv-build\\Scripts\\python.exe -m pip check
+.\\.venv-build\\Scripts\\python.exe -m unittest discover -s tests -v
+.\\.venv-build\\Scripts\\python.exe -m PyInstaller --clean --noconfirm 7z-encrypt-tool.spec
+.\\dist\\7z-encrypt-tool.exe --self-test --self-test-output .\\self-test.json
+```
+GitHub Actions 自动执行依赖安装、源码回归测试、Windows x64 EXE 打包、冻结 EXE 自检，并生成 SHA-256 与构建记录。发布不需要代码签名账户或证书。详情见 `BUILD_REPRODUCIBILITY.md` 和 `CODE_SIGNING.md`。
