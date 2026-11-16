@@ -36,6 +36,14 @@ if phase == "after_staged_password":
             os._exit(81)
         return result
     main._verify_inventory_unchanged = interrupted
+elif phase == "during_ready_update":
+    import crash_recovery
+    original = crash_recovery.os.replace
+    def interrupted(src, dst):
+        if str(src).endswith(".update"):
+            os._exit(84)
+        return original(src, dst)
+    crash_recovery.os.replace = interrupted
 elif phase in ("after_published_password", "after_published_archive"):
     original = main._publish_without_overwrite
     def interrupted(src, destination):
@@ -144,6 +152,35 @@ class CrashRecoveryTests(unittest.TestCase):
             (self.root / "unpacked" / "input.txt").read_bytes(),
             self.source.read_bytes(),
         )
+
+    def test_kill_during_ready_journal_update_is_recovered(self):
+        self._crash("during_ready_update", 84)
+        self.assertEqual(len(list(self.journals.glob(".transaction-*.json"))), 1)
+        self.assertEqual(len(list(self.journals.glob(".transaction-*.update"))), 1)
+        self.assertGreaterEqual(len(list(self.passwords.glob("*.incomplete.txt"))), 1)
+        self._restart_and_recover()
+        self.assertEqual(list(self.output.iterdir()), [])
+        self.assertEqual(list(self.passwords.iterdir()), [])
+
+    def test_successful_run_cleans_its_journal_and_staging(self):
+        result = self._run(
+            "import main,sys; main.create_encrypted_bundle("
+            "[sys.argv[1]],sys.argv[2],password_file=sys.argv[3])",
+            self.source, self.output, self.record,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(len(list(self.output.glob("[!.]*.7z"))), 1)
+        self.assertTrue(self.record.is_file())
+        self.assertEqual(list(self.journals.glob(".transaction-*.json")), [])
+        self.assertEqual(list(self.journals.glob(".transaction-*.update")), [])
+        self.assertEqual(list(self.output.glob("*.incomplete.7z")), [])
+        self.assertEqual(list(self.passwords.glob("*.incomplete.txt")), [])
+        restart = self._run(
+            "import json,main; print(json.dumps(main.recover_interrupted_transactions()))"
+        )
+        self.assertEqual(restart.returncode, 0, restart.stderr)
+        self.assertEqual(json.loads(restart.stdout.strip()), [0, []])
+
 
     def test_untrusted_replacement_password_is_never_deleted(self):
         self._crash("after_published_password", 82)

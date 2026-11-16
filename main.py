@@ -815,6 +815,14 @@ def run_packaged_self_test(report_path: str | None = None) -> int:
             archive_path = Path(produced_archive)
             if Path(produced_record).resolve() != record_path.resolve() or not record_path.exists():
                 raise RuntimeError("业务流程未生成单独保存的密码记录。")
+            # A clean transaction must not leave a journal or either staged
+            # artifact, even in the actual frozen Windows EXE.
+            if (
+                any(_transaction_store().glob(".transaction-*.json"))
+                or any(_transaction_store().glob(".transaction-*.update"))
+                or find_interrupted_artifacts(output_dir, secret_dir)
+            ):
+                raise RuntimeError("业务成功后仍遗留事务日志或暂存文件。")
             record_text = record_path.read_text(encoding="utf-8-sig")
             password = next(
                 line.partition("：")[2] for line in record_text.splitlines()
@@ -870,6 +878,7 @@ def run_packaged_self_test(report_path: str | None = None) -> int:
                 "business_flow": True,
                 "directory_archive": True,
                 "empty_directory_preserved": True,
+                "crash_recovery_clean": True,
             }
         )
         exit_code = 0

@@ -105,7 +105,8 @@ jobs:
             -not $result.business_flow -or
             -not $result.archive_round_trip -or
             -not $result.directory_archive -or
-            -not $result.empty_directory_preserved
+            -not $result.empty_directory_preserved -or
+            -not $result.crash_recovery_clean
           ) {
             throw "The frozen EXE self-test report indicates a failed check."
           }
