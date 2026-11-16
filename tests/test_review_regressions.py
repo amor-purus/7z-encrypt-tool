@@ -145,6 +145,69 @@ class ReviewProductionTests(unittest.TestCase):
         self.assertEqual(list(self.keys.iterdir()), [])
         self.assertEqual(payload.read_bytes(), b"never modify")
 
+    def test_interrupt_after_password_publish_before_archive_cleans_pair(self):
+        payload = self.root / "original.txt"
+        payload.write_bytes(b"stable")
+        actual_publish = main._publish_without_overwrite
+
+        def interrupt_after_password(src, dst):
+            actual_publish(src, dst)
+            if dst.name == "key.txt":
+                raise KeyboardInterrupt("injected immediately after password rename")
+
+        with mock.patch.object(main, "_publish_without_overwrite",
+                               side_effect=interrupt_after_password):
+            with self.assertRaises(KeyboardInterrupt):
+                self._create([payload])
+        self.assertEqual(list(self.output.iterdir()), [])
+        self.assertEqual(list(self.keys.iterdir()), [])
+
+    def test_archive_target_race_never_overwrites_existing_file(self):
+        payload = self.root / "original.txt"
+        payload.write_bytes(b"stable")
+        conflict = self.output / "racing-name.7z"
+        actual_publish = main._publish_without_overwrite
+
+        def create_competitor_before_archive(src, dst):
+            if dst == conflict:
+                conflict.write_bytes(b"competing archive must not be overwritten")
+            return actual_publish(src, dst)
+
+        with (mock.patch.object(main, "make_archive_base", return_value="racing-name"),
+              mock.patch.object(main, "_publish_without_overwrite",
+                                side_effect=create_competitor_before_archive)):
+            with self.assertRaises(FileExistsError):
+                self._create([payload])
+        self.assertEqual(conflict.read_bytes(), b"competing archive must not be overwritten")
+        self.assertEqual(list(self.keys.iterdir()), [])
+        self.assertEqual(list(self.output.iterdir()), [conflict])
+
+    def test_rollback_failure_explicitly_identifies_residual_password(self):
+        payload = self.root / "original.txt"
+        payload.write_bytes(b"stable")
+        target = self.keys / "key.txt"
+        actual_publish = main._publish_without_overwrite
+        actual_unlink = Path.unlink
+
+        def fail_archive(src, dst):
+            if dst.suffix == ".7z":
+                raise OSError("publish failed")
+            return actual_publish(src, dst)
+
+        def block_password_removal(path, *args, **kwargs):
+            if str(path) == str(target):
+                raise PermissionError("rollback denied")
+            return actual_unlink(path, *args, **kwargs)
+
+        with (mock.patch.object(main, "_publish_without_overwrite", side_effect=fail_archive),
+              mock.patch.object(Path, "unlink", block_password_removal)):
+            with self.assertRaisesRegex(RuntimeError, "明文密码仍可能保留在") as raised:
+                self._create([payload])
+        self.assertIn(str(target), str(raised.exception))
+        self.assertTrue(target.exists())
+        self.assertEqual(list(self.output.iterdir()), [])
+
+
     def test_archive_rewrite_after_verification_is_detected(self):
         payload = self.root / "original.txt"
         payload.write_bytes(b"original")

@@ -654,18 +654,31 @@ def create_encrypted_bundle(
         _sync_directory_if_supported(out_dir)
         return str(final_archive), str(record)
     except BaseException as exc:
-        # Do NOT use a boolean assigned AFTER the publish call: an async
-        # exception between rename() and assignment can delete the ONLY key.
+        # Archive publication may have succeeded before an asynchronous
+        # exception arrived. Never trust a flag assigned after rename().
         archive_state = _is_our_published_file(final_archive, archive_id)
-        if archive_state is False and _is_our_published_file(record, record_id) is True:
-            try:
-                record.unlink()
-                _sync_directory_if_supported(record.parent)
-            except OSError:
-                _safe_log("失败后无法回滚明文密码记录：%s", record)
-        elif archive_state is not False and os.path.lexists(record):
-            # Keep the secret if the archive was published or its status is
-            # uncertain; a recoverable orphan password is safer than key loss.
+        if archive_state is False:
+            record_state = _is_our_published_file(record, record_id)
+            if record_state is True:
+                try:
+                    record.unlink()
+                    _sync_directory_if_supported(record.parent)
+                except OSError:
+                    _safe_log("失败后无法回滚明文密码记录：%s", record)
+                    if isinstance(exc, Exception):
+                        raise RuntimeError(
+                            f"{exc}\n密码记录回滚失败，明文密码仍可能保留在：{record}\n"
+                            "请检查该路径并安全处理。"
+                        ) from exc
+            elif record_state is None and os.path.lexists(record):
+                # On filesystems without trustworthy file IDs, keep a
+                # possibly valid password rather than risk a wrong delete.
+                if isinstance(exc, Exception):
+                    raise RuntimeError(
+                        f"{exc}\n无法确认密码记录的文件身份；请检查：{record}"
+                    ) from exc
+        elif os.path.lexists(record):
+            # Archive already published or state uncertain: never delete key.
             if isinstance(exc, Exception):
                 raise RuntimeError(
                     f"{exc}\n归档发布状态不确定；密码记录已保留在：{record}\n"
