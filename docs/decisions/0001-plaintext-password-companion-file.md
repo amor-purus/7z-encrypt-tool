@@ -20,3 +20,12 @@ Atomic rename applies separately to each file, not as one cross-directory transa
 ## v1.4.0 exception and recovery policy
 
 The password record is published before its encrypted archive. If an archive rename's result is ambiguous or a successfully published archive is interrupted before returning, **the password must not be deleted**. Ordinary errors that demonstrably precede archive publication roll back the password when possible; errors that leave an orphan TXT must make its path visible. Staging TXT files are named as containing plaintext, are never silently deleted after an abnormal termination, and are discovered on the next task's selected paths. Storage-device power failure, hostile writers in shared output directories, and uncoordinated source edits remain explicit limits, not guaranteed atomic transactions.
+
+
+## v1.5.0 crash-recovery transaction protocol
+
+A metadata-only (no password) journal records a random transaction ID, destination paths, staged file prefixes and final file identities. The journal is fsynced **before** any staged output is created; its READY update is durable before either publication rename. An OS-level lock serializes publishing and recovering processes.
+
+On restart, the program reconciles each journal: incomplete outputs and exactly identity-matching orphan password files are rolled back only if the archive can conclusively be shown absent. If both outputs were published, the pair is preserved. If a directory is unavailable, a final file was replaced, or its identity cannot be proven, no ambiguous files are deleted; the case is reported and new encryption is blocked.
+
+This protocol provides **post-restart recoverable consistency after ordinary process termination**, assuming functioning storage. It does **not** eliminate the intermediate physical state between two separate renames, claim power-loss atomicity on Windows, or silently delete legacy unjournaled v1.4.0 staging.

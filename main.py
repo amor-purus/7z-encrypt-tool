@@ -25,10 +25,12 @@ from pathlib import Path
 from typing import Callable
 
 import tkinter as tk
+
+import crash_recovery as recovery
 from tkinter import filedialog, messagebox, ttk
 
 APP_TITLE = "文件加密工具"
-APP_VERSION = "1.4.0"
+APP_VERSION = "1.5.0"
 PASSWORD_LENGTH = 32
 ARCHIVE_NAME_LENGTH = 10
 
@@ -513,12 +515,47 @@ def _is_our_published_file(target: Path, identity: tuple[int, int] | None) -> bo
         return None
 
 
+def _transaction_store() -> Path:
+    """Private metadata-only journal; errors here prevent unsafe publication."""
+    return recovery.transactions_dir(app_data_dir())
+
+
+def recover_interrupted_transactions() -> tuple[int, list[str]]:
+    """Reconcile interrupted tasks before new work or on GUI startup."""
+    directory = _transaction_store()
+    with recovery.exclusive_transaction_access(directory):
+        return recovery.recover_transactions_locked(directory)
+
+
 def create_encrypted_bundle(
     items: list[str | Path],
     output_folder: str,
     progress_callback: Callable[[str], None] | None = None,
     *,
     password_file: str | None = None,
+) -> tuple[str, str]:
+    """Run a journaled, cross-process-serialized publication transaction."""
+    directory = _transaction_store()
+    with recovery.exclusive_transaction_access(directory):
+        _, unresolved = recovery.recover_transactions_locked(directory)
+        if unresolved:
+            raise RuntimeError(
+                "上次中断的任务尚未恢复，已拒绝开始新的加密任务：\n"
+                + "\n".join(unresolved[:5])
+            )
+        return _create_encrypted_bundle_locked(
+            items, output_folder, progress_callback,
+            password_file=password_file, transaction_directory=directory,
+        )
+
+
+def _create_encrypted_bundle_locked(
+    items: list[str | Path],
+    output_folder: str,
+    progress_callback: Callable[[str], None] | None = None,
+    *,
+    password_file: str | None = None,
+    transaction_directory: Path,
 ) -> tuple[str, str]:
     """Validate, encrypt, verify and publish password-first with conservative recovery.
 
@@ -563,11 +600,18 @@ def create_encrypted_bundle(
     temp_record: Path | None = None
     archive_id: tuple[int, int] | None = None
     record_id: tuple[int, int] | None = None
+    journal_path: Path | None = None
+    journal: dict[str, object] | None = None
 
     try:
+        # Intent is durably recorded BEFORE any staging file appears. The
+        # journal contains paths/identities only, never the actual password.
+        journal_path, journal = recovery.begin_transaction(
+            transaction_directory, final_archive, record, base
+        )
         _notify_progress(progress_callback, "正在加密打包，请不要关闭工具……")
         archive_fd, archive_name = tempfile.mkstemp(
-            prefix=f".7z-archive-{base}-", suffix=".incomplete.7z", dir=out_dir
+            prefix=journal["archive_prefix"], suffix=".incomplete.7z", dir=out_dir
         )
         temp_archive = Path(archive_name)
 
@@ -630,7 +674,7 @@ def create_encrypted_bundle(
         # Residuals after an abnormal crash are deliberately conspicuous:
         # incomplete TXT can contain the complete plaintext password.
         password_fd, password_name = tempfile.mkstemp(
-            prefix=f".7z-password-PLAINTEXT-{base}-",
+            prefix=journal["record_prefix"],
             suffix=".incomplete.txt", dir=record.parent
         )
         temp_record = Path(password_name)
@@ -646,6 +690,7 @@ def create_encrypted_bundle(
             raise FileExistsError("目标文件已存在，拒绝覆盖，请重新选择位置。")
 
         record_id = _file_identity(temp_record)
+        recovery.mark_ready(journal_path, journal, temp_archive, temp_record)
         _publish_without_overwrite(temp_record, record)
         _sync_directory_if_supported(record.parent)
         # The verified archive cannot be published unless the password has
@@ -693,6 +738,12 @@ def create_encrypted_bundle(
                 temporary_path.unlink(missing_ok=True)
             except OSError:
                 _safe_warning("无法清理暂存文件（可能包含明文密码）：%s", temporary_path)
+        if journal_path is not None:
+            # Ordinary exceptions and asynchronous interrupts use the same
+            # idempotent recovery rules as restart after a hard process kill.
+            _, warnings = recovery.recover_transactions_locked(transaction_directory)
+            for warning in warnings:
+                _safe_warning("加密事务尚未完全恢复：%s", warning)
 
 
 def run_packaged_self_test(report_path: str | None = None) -> int:
@@ -1227,6 +1278,13 @@ def main() -> int:
                 return 2
         return run_packaged_self_test(report_path)
 
+    recovered_count = 0
+    recovery_warnings: list[str] = []
+    try:
+        recovered_count, recovery_warnings = recover_interrupted_transactions()
+    except Exception as exc:
+        recovery_warnings = [f"无法执行崩溃恢复：{exc}"]
+
     try:
         enable_windows_dpi_awareness()
         root = tk.Tk()
@@ -1235,6 +1293,25 @@ def main() -> int:
         except tk.TclError:
             pass
         EncryptApp(root, log_file=log_file)
+        if recovered_count or recovery_warnings:
+            def show_recovery_report() -> None:
+                if recovery_warnings:
+                    messagebox.showwarning(
+                        "任务恢复需要处理",
+                        f"已自动处理 {recovered_count} 项中断任务。\n"
+                        "仍有无法安全恢复的任务，已保留相关文件：\n\n"
+                        + "\n".join(recovery_warnings[:5])
+                        + "\n\n请检查日志及相关路径；问题解决前不能开始新的加密。",
+                        parent=root,
+                    )
+                else:
+                    messagebox.showinfo(
+                        "中断任务已恢复",
+                        f"已自动恢复或清理 {recovered_count} 项上次中断的任务。"
+                        "完整归档与对应密码记录不会被删除。",
+                        parent=root,
+                    )
+            root.after(0, show_recovery_report)
         root.mainloop()
         return 0
     except Exception as exc:

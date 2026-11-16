@@ -29,6 +29,11 @@ class ProductionIntegrationTests(unittest.TestCase):
         self.secrets = self.root / "separate-passwords"
         self.out.mkdir()
         self.secrets.mkdir()
+        self.appdata = self.root / "appdata"
+        self.appdata.mkdir()
+        self.patch_appdata = mock.patch("main.app_data_dir", return_value=self.appdata)
+        self.patch_appdata.start()
+        self.addCleanup(self.patch_appdata.stop)
 
     def tearDown(self) -> None:
         self.temporary.cleanup()

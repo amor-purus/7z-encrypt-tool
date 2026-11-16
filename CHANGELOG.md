@@ -1,5 +1,14 @@
 # Changelog
 
+## v1.5.0 — 2026-11-16
+
+- Added a persistent, metadata-only transaction journal before creation of any stage file.
+- Serialized packaging and recovery across processes/threads using an OS-level lock released on process exit.
+- On restart, automatically roll back orphaned password records and unfinished files; retain published archive/password pairs and remove completed journals.
+- Recovery checks filesystem identities and refuses destructive cleanup when volumes disappear or destinations change.
+- Added real Windows subprocess hard-exit tests after password staging, final password publication, and final encrypted archive publication; recovery is tested from a new process.
+- No journal contains the generated password. Physical cross-directory atomicity and hardware power-loss durability are explicitly not claimed.
+
 ## v1.4.0 — 2026-11-16
 
 - Fixed silent loss of distinct case-sensitive NTFS entries during input deduplication and ancestor checks using filesystem identity rather than case-folded path comparisons.

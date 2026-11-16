@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
+
+import main
 
 import py7zr
 
@@ -17,6 +20,11 @@ class DirectoryBundleTests(unittest.TestCase):
         self.output.mkdir()
         self.password_dir = self.root / "separate-passwords"
         self.password_dir.mkdir()
+        self.appdata = self.root / "appdata"
+        self.appdata.mkdir()
+        self.patch_appdata = mock.patch("main.app_data_dir", return_value=self.appdata)
+        self.patch_appdata.start()
+        self.addCleanup(self.patch_appdata.stop)
 
     def tearDown(self) -> None:
         self.temp.cleanup()

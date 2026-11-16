@@ -73,7 +73,7 @@ jobs:
           python -m pip freeze --all
 
       - name: Compile application and tests
-        run: python -m compileall -q main.py tests pyinstaller_hooks
+        run: python -m compileall -q main.py crash_recovery.py tests pyinstaller_hooks
 
       - name: Run source regression tests
         run: python -m unittest discover -s tests -v

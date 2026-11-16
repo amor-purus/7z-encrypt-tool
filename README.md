@@ -1,4 +1,4 @@
-# 7z File Encryption Tool v1.4.0
+# 7z File Encryption Tool v1.5.0
 
 A standalone Windows 11 GUI application for creating AES-256 encrypted 7z archives from files, folders, or a mixed selection.
 
@@ -61,16 +61,20 @@ CI artifacts are retained for 30 days. Release and CI EXE files are both unsigne
 - Detects source files or directory layout changed during packaging, preventing a false-success archive from a changed input set.
 - Uses exclusive staging and SHA-256 rechecks to detect modification of the encrypted staging file before publication.
 
-## Interrupted-task recovery and durability boundary
+## Crash recovery, password preservation, and power-loss boundaries
 
-If the process is terminated abruptly, its cleanup code cannot run. Before a new task, the app scans the selected archive/password directories for recognizable staging files and warns you. It does **not** automatically delete potentially recoverable plaintext passwords.
+**v1.5.0 adds automatic crash recovery.** A metadata-only journal is written and fsynced in the current user's application-data folder **before** archive or password staging appears. It contains destinations, random transaction IDs, and file identities, **never the plaintext password**. The password is written only in the user-selected, separate password directory.
 
-- Archive staging names: `.7z-archive-*.incomplete.7z`. They contain encrypted archives but are not automatically considered finished.
-- Password staging names: `.7z-password-PLAINTEXT-*.incomplete.txt`. **These may contain the full plaintext password.** Treat them as secrets. Check associated archive/name, recover the key if necessary, then remove abandoned files manually.
-- A final password TXT can exist without its archive after a crash. It identifies the expected random 7z archive name.
-- Files are flushed to storage before publication; directory metadata is fsynced where supported. Neither this nor two renames on separate directories provides a power-failure-atomic transaction on Windows or other operating systems.
+- An operating-system transaction lock prevents another instance from cleaning up an active task. The OS releases it when that process dies.
+- At the next launch, the application scans durable journals and reconciles them **before allowing new tasks**. The production API does the same under the lock.
+- If no archive was published, unfinished archive and temporary plaintext password files are removed. A published password TXT is rolled back only if its filesystem identity matches the journal.
+- When both final files are published, the archive/password pair is preserved, temporary files are cleaned, and the journal is removed.
+- If a target directory disappears or changes, or final-file identity cannot be verified, recovery **does not delete ambiguous files**. It warns and blocks new encryption until the problem is resolved.
+- Staged archives end in `.incomplete.7z` and plaintext password staging ends in `.incomplete.txt`. Old unjournaled staging from v1.4.0 still requires manual attention.
 
-Archive staging uses a random exclusive file handle and SHA-256 post-verification checks. This detects ordinary tampering before publication, but **does not protect files in hostile or shared directories** against a concurrent actor with write permission, nor does it guarantee an immutable snapshot of a source changed by another process. The tool rejects detectable source changes; use a stable source directory and trusted private output/password locations.
+**Hard process kill vs. power loss:** The recovery protocol is tested by ending a real Windows subprocess with `os._exit()` at three publication boundaries and recovering in a separate process. This demonstrates post-restart recovery from abrupt *process* termination, not from actual electrical power loss. Windows cannot atomically commit two files in independent directories. Filesystems that lose acknowledged writes, inaccessible drives, hostile concurrent writers, or physical storage failure can still create ambiguous states requiring manual intervention. The application prioritizes the only surviving decryption key.
+
+Files are fsynced before publication. Directory metadata is fsynced where portable (POSIX); Windows directory fsync is not generally available. Output and password locations should be private and on stable storage.
 
 ## Logs
 
