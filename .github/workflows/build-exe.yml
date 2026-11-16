@@ -31,6 +31,157 @@ jobs:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
+      - name: Validate the source for version-tag builds
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: pwsh
+        run: |
+          if ($env:GITHUB_REF_NAME -cnotmatch '^v[0-9]+\.[0-9]+\.[0-9]+        shell: pwsh
+        run: |
+          $epoch = (git show -s --format=%ct HEAD).Trim()
+          if ($LASTEXITCODE -ne 0 -or $epoch -notmatch '^\d+$') {
+            throw "Could not resolve the source commit timestamp."
+          }
+          "SOURCE_DATE_EPOCH=$epoch" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Set up build Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7
+        with:
+          python-version: "3.14.10"
+          architecture: "x64"
+          cache: "pip"
+          cache-dependency-path: requirements-lock.txt
+
+      - name: Install the locked build environment
+        shell: pwsh
+        run: |
+          python -m pip install --disable-pip-version-check --only-binary=:all: --upgrade "pip==26.3"
+          python -m pip install --disable-pip-version-check --only-binary=:all: --no-deps -r requirements-lock.txt
+          python -m pip check
+          python -m pip freeze --all
+
+      - name: Compile application and tests
+        run: python -m compileall -q main.py tests pyinstaller_hooks
+
+      - name: Run source regression tests
+        run: python -m unittest discover -s tests -v
+
+      - name: Build single-file windowed EXE
+        run: python -m PyInstaller --clean --noconfirm 7z-encrypt-tool.spec
+
+      - name: Smoke-test the frozen EXE
+        shell: pwsh
+        run: |
+          $exe = Join-Path $PWD "dist\7z-encrypt-tool.exe"
+          if (-not (Test-Path $exe)) {
+            throw "PyInstaller did not produce dist\7z-encrypt-tool.exe"
+          }
+          $report = Join-Path $env:RUNNER_TEMP "7z-encrypt-self-test.json"
+          $process = Start-Process -FilePath $exe -ArgumentList @("--self-test", "--self-test-output", $report) -PassThru -Wait -WindowStyle Hidden
+          if ($process.ExitCode -ne 0) {
+            if (Test-Path $report) { Get-Content $report }
+            throw "The frozen EXE self-test failed with exit code $($process.ExitCode)."
+          }
+          if (-not (Test-Path $report)) {
+            throw "The frozen EXE did not write its self-test report."
+          }
+          Get-Content $report
+          $result = Get-Content $report -Raw | ConvertFrom-Json
+          if (
+            -not $result.ok -or
+            -not $result.encrypted_header -or
+            -not $result.archive_round_trip -or
+            -not $result.directory_archive -or
+            -not $result.empty_directory_preserved
+          ) {
+            throw "The frozen EXE self-test report indicates a failed check."
+          }
+
+      - name: Prepare unsigned release assets and checksums
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path release-assets | Out-Null
+          $exe = Join-Path $PWD "dist\7z-encrypt-tool.exe"
+          $releaseExe = Join-Path $PWD "release-assets\7z-encrypt-tool-windows-x64.exe"
+          Copy-Item $exe $releaseExe
+          $version = (& python -c "import main; print(main.APP_VERSION)").Trim()
+          if ($LASTEXITCODE -ne 0 -or -not $version) {
+            throw "Could not resolve the application version."
+          }
+          @"
+          App version: $version
+          Build Python: $(python --version)
+          Pip: $(python -m pip --version)
+          PyInstaller: $(python -m PyInstaller --version)
+          Runner image: $env:ImageOS $env:ImageVersion
+          Source commit: $env:GITHUB_SHA
+          SOURCE_DATE_EPOCH: $env:SOURCE_DATE_EPOCH
+          PYTHONHASHSEED: $env:PYTHONHASHSEED
+          Authenticode: not signed (project decision)
+          "@ | Set-Content "release-assets\BUILD-INFO.txt" -Encoding utf8
+          python -m pip freeze --all | Set-Content "release-assets\DEPENDENCIES.txt" -Encoding utf8
+          $hash = (Get-FileHash $releaseExe -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  7z-encrypt-tool-windows-x64.exe" | Set-Content "release-assets\SHA256SUMS.txt" -Encoding ascii
+          Write-Host "Unsigned release EXE SHA-256: $hash"
+
+      - name: Upload tested Windows build and release assets
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: 7z-encrypt-tool-windows-x64-${{ github.sha }}
+          path: release-assets/
+          if-no-files-found: error
+          retention-days: 30
+
+  release:
+    name: Publish unsigned GitHub Release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs:
+      - build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - name: Download tested unsigned release assets
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          name: 7z-encrypt-tool-windows-x64-${{ github.sha }}
+          path: release-assets
+
+      - name: Resolve release tag
+        id: release_tag
+        shell: bash
+        run: |
+          if [[ "$GITHUB_REF_TYPE" != tag || ! "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Only an explicit vMAJOR.MINOR.PATCH tag may publish a Release."
+            exit 1
+          fi
+          tag="$GITHUB_REF_NAME"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+      - name: Attach unsigned EXE and provenance to GitHub Release
+        uses: softprops/action-gh-release@8a0cd651e5b2365bd640854a3fa5dfc70e4875f3 # v3
+        with:
+          tag_name: ${{ steps.release_tag.outputs.tag }}
+          target_commitish: ${{ github.sha }}
+          name: 7z File Encryption Tool ${{ steps.release_tag.outputs.tag }}
+          files: |
+            release-assets/7z-encrypt-tool-windows-x64.exe
+            release-assets/SHA256SUMS.txt
+            release-assets/BUILD-INFO.txt
+            release-assets/DEPENDENCIES.txt
+          generate_release_notes: true
+) {
+            throw "Release tags must use vMAJOR.MINOR.PATCH: $env:GITHUB_REF_NAME"
+          }
+          $checkoutSha = (git rev-parse HEAD).Trim()
+          if ($LASTEXITCODE -ne 0 -or $checkoutSha -ne $env:GITHUB_SHA) {
+            throw "Checked out source does not match the triggering tag commit."
+          }
+          $appVersion = (& python -c "import main; print(main.APP_VERSION)").Trim()
+          if ($LASTEXITCODE -ne 0 -or ("v" + $appVersion) -cne $env:GITHUB_REF_NAME) {
+            throw "Git tag $env:GITHUB_REF_NAME does not match application version $appVersion."
+          }
+
       - name: Set reproducible build timestamp
         shell: pwsh
         run: |
