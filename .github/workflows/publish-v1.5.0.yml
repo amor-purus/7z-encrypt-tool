@@ -1,0 +1,104 @@
+name: Publish verified v1.5.0 (one-time)
+
+on:
+  push:
+    branches:
+      - "ops/publish-v1.5.0"
+
+permissions:
+  contents: write
+  actions: read
+
+jobs:
+  publish:
+    name: Publish verified v1.5.0 release
+    runs-on: ubuntu-24.04
+    env:
+      GH_TOKEN: "${{ github.token }}"
+      EXPECTED_COMMIT: "3fe03f89e387dbebf2f7ed46f2edd8018d1b6417"
+      TESTED_RUN: "43896338385"
+      RELEASE_TAG: "v1.5.0"
+      EXPECTED_EXE_SHA256: "a1be0598efc5e9221885aea915b5bf4268d8dc87b1a1e6c429b352b578d8f3e6"
+
+    steps:
+      - name: Verify unchanged source and successful Windows tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          head_sha="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/main" --jq '.object.sha')"
+          if [[ "$head_sha" != "$EXPECTED_COMMIT" ]]; then
+            echo "::error::main moved away from the tested commit; refusing to publish."
+            exit 1
+          fi
+          run_sha="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${TESTED_RUN}" --jq '.head_sha')"
+          conclusion="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${TESTED_RUN}" --jq '.conclusion')"
+          if [[ "$run_sha" != "$EXPECTED_COMMIT" || "$conclusion" != "success" ]]; then
+            echo "::error::Windows build is not successful on the pinned commit."
+            exit 1
+          fi
+
+      - name: Download immutable tested Windows binary and provenance
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          name: 7z-encrypt-tool-windows-x64-3fe03f89e387dbebf2f7ed46f2edd8018d1b6417
+          run-id: 43896338385
+          github-token: "${{ github.token }}"
+          path: release-assets
+
+      - name: Verify downloaded exact binary and build evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd release-assets
+          test -s 7z-encrypt-tool-windows-x64.exe
+          test -s SHA256SUMS.txt
+          test -s BUILD-INFO.txt
+          test -s DEPENDENCIES.txt
+          echo "${EXPECTED_EXE_SHA256}  7z-encrypt-tool-windows-x64.exe" | sha256sum --check --status
+          sha256sum --check SHA256SUMS.txt
+          grep -F "App version: 1.5.0" BUILD-INFO.txt
+          grep -F "Source commit: ${EXPECTED_COMMIT}" BUILD-INFO.txt
+          file 7z-encrypt-tool-windows-x64.exe
+
+      - name: Create pinned tag and publish GitHub Release
+        shell: bash
+        run: |
+          set -euo pipefail
+          current_tag_sha="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${RELEASE_TAG}" --jq '.object.sha' 2>/dev/null || true)"
+          if [[ -n "$current_tag_sha" && "$current_tag_sha" != "$EXPECTED_COMMIT" ]]; then
+            echo "::error::A tag exists but points at the wrong commit."
+            exit 1
+          fi
+          if [[ -z "$current_tag_sha" ]]; then
+            gh api --method POST "repos/${GITHUB_REPOSITORY}/git/refs" \
+              -f "ref=refs/tags/${RELEASE_TAG}" -f "sha=${EXPECTED_COMMIT}"
+          fi
+
+          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Release already exists; verifying without modifying."
+          else
+            gh release create "$RELEASE_TAG" \
+              release-assets/7z-encrypt-tool-windows-x64.exe \
+              release-assets/SHA256SUMS.txt \
+              release-assets/BUILD-INFO.txt \
+              release-assets/DEPENDENCIES.txt \
+              --repo "$GITHUB_REPOSITORY" \
+              --verify-tag \
+              --latest \
+              --title "7z File Encryption Tool v1.5.0" \
+              --notes "Official Windows x64 v1.5.0 release from verified commit ${EXPECTED_COMMIT}.
+
+          Changes: durable metadata-only crash-recovery journal, cross-process transaction lock, automatic recovery of interrupted archive/password publication, safety checks for missing or replaced files, and encrypted-archive integrity verification.
+
+          Validation: Windows x64 CI run ${TESTED_RUN}, 45/45 source tests, zero skipped, frozen EXE self-test (including no remaining transactions). The released EXE is unsigned; verify its SHA-256 using SHA256SUMS.txt.
+
+          Limitation: this provides restart recovery following process termination, not physical two-directory power-loss atomicity."
+          fi
+
+          gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
+            --json tagName,isDraft,isPrerelease,assets,url > release-result.json
+          jq -e '.tagName == "v1.5.0" and (.isDraft | not) and (.isPrerelease | not)' release-result.json
+          for filename in 7z-encrypt-tool-windows-x64.exe SHA256SUMS.txt BUILD-INFO.txt DEPENDENCIES.txt; do
+            jq -e --arg name "$filename" '[.assets[].name] | index($name) != null' release-result.json
+          done
+          cat release-result.json
