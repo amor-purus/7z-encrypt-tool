@@ -26,7 +26,7 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
 APP_TITLE = "文件加密工具"
-APP_VERSION = "1.2.0"
+APP_VERSION = "1.3.0"
 PASSWORD_LENGTH = 32
 ARCHIVE_NAME_LENGTH = 10
 
@@ -162,6 +162,21 @@ def _directory_layout(source: Path) -> list[tuple[str, bool]]:
             )
             layout.append((relative_name, False))
 
+    # A common archive prefix cannot resolve collisions inside one source tree.
+    # Validate the original, unmodified names before trying alternative roots.
+    seen: dict[tuple[str, ...], str] = {}
+    for relative, _is_directory in layout:
+        key = _archive_key(relative)
+        if not key:
+            continue
+        previous = seen.get(key)
+        if previous is not None:
+            raise ValueError(
+                "源目录内部存在无法通过更换归档根目录解决的路径冲突：\n"
+                f"{source / previous}\n{source / relative}\n"
+                "请先重命名其中一个源文件或文件夹。"
+            )
+        seen[key] = relative
     return layout
 
 
@@ -284,13 +299,15 @@ def make_archive_names(items: list[Path]) -> list[str]:
                 stem, suffix = source.name or "folder", ""
             else:
                 stem, suffix = source.stem, source.suffix
-            number = 2
-            while True:
+            for number in range(2, 1002):
                 candidate = f"{stem}_{number}{suffix}"
                 if can_reserve(index, candidate):
                     selected = candidate
                     break
-                number += 1
+            if selected is None:
+                raise RuntimeError(
+                    f"归档名称重试已达到上限（1000 次）：{source}"
+                )
 
         reserve(index, selected)
         result[index] = selected
@@ -351,33 +368,44 @@ def _notify_progress(callback: Callable[[str], None] | None, message: str) -> No
             logging.exception("进度通知失败")
 
 
-def _expected_archive_members(
+def _archive_inventory(
     paths: list[Path], archive_names: list[str]
-) -> list[str]:
-    """列出每个输入在归档中应出现的全部成员，包括空目录。"""
-    expected: list[str] = []
+) -> list[tuple[Path, str]]:
+    """按已检查的清单构建单一写入计划，包含根目录和空目录。"""
+    inventory: list[tuple[Path, str]] = []
+    keys: dict[tuple[str, ...], Path] = {}
     for source, archive_name in zip(paths, archive_names):
-        if source.is_dir():
-            layout = _directory_layout(source)
-            expected.extend(
-                archive_name if not relative else f"{archive_name}/{relative}"
-                for relative, _is_directory in layout
-            )
-        else:
-            expected.append(archive_name)
+        layout = _directory_layout(source) if source.is_dir() else [("", False)]
+        for relative, _is_directory in layout:
+            actual_path = source / relative if relative else source
+            member_name = archive_name if not relative else f"{archive_name}/{relative}"
+            key = _archive_key(member_name.rstrip("/"))
+            if not key:
+                raise ValueError(f"无效归档路径：{actual_path}")
+            if key in keys:
+                raise ValueError(
+                    f"归档成员路径冲突：\n{keys[key]}\n{actual_path}"
+                )
+            keys[key] = actual_path
+            inventory.append((actual_path, member_name))
+    return inventory
 
-    keys = [_archive_key(name.rstrip("/")) for name in expected]
-    if len(keys) != len(set(keys)):
-        raise RuntimeError("归档成员路径发生冲突，已在创建压缩包前中止。")
-    return expected
+
+def _expected_archive_members(paths: list[Path], archive_names: list[str]) -> list[str]:
+    return [name for _, name in _archive_inventory(paths, archive_names)]
 
 
 def create_encrypted_bundle(
     items: list[str | Path],
     output_folder: str,
     progress_callback: Callable[[str], None] | None = None,
+    *,
+    password_file: str | None = None,
 ) -> tuple[str, str]:
-    """创建加密 7z 和配套 TXT；成功前不碰原文件，失败时清理临时产物。"""
+    """全部验证通过后才发布归档与单独指定的明文密码记录。
+
+    密码记录必须在另一个目录；两个文件分别原子重命名，失败则回滚。
+    """
     try:
         import py7zr
     except ImportError as exc:
@@ -390,35 +418,47 @@ def create_encrypted_bundle(
     out_dir = Path(output_folder).resolve()
     if not out_dir.is_dir():
         raise NotADirectoryError("输出位置无效。")
+    if not password_file:
+        raise ValueError("必须单独选择明文密码 TXT 的保存位置。")
 
-    # 在任何临时文件创建之前阻断输出目录落入源文件夹树的情况。
+    record = Path(password_file).resolve()
+    if not record.parent.is_dir() or record.parent == out_dir:
+        raise ValueError("密码 TXT 必须保存到存在的、不同于压缩包输出目录的文件夹。")
+    if os.path.lexists(record):
+        raise FileExistsError(f"密码记录目标已存在，拒绝覆盖：{record}")
+
+    # No source modification, including accidental plaintext password creation.
     for source in paths:
-        if source.is_dir() and (
-            out_dir == source or out_dir.is_relative_to(source)
-        ):
-            raise ValueError(
-                f"输出文件夹位于待加密文件夹内部：{source}\n"
-                "请将输出位置更换到该源文件夹之外。"
-            )
+        if source.is_dir():
+            if out_dir == source or out_dir.is_relative_to(source):
+                raise ValueError(
+                    f"输出文件夹位于待加密文件夹内部：{source}\n"
+                    "请将输出位置更换到该源文件夹之外。"
+                )
+            if record.is_relative_to(source):
+                raise ValueError(f"密码记录不能写入待加密源文件夹：{source}")
+        elif record == source:
+            raise ValueError(f"密码记录不能覆盖待加密源文件：{source}")
 
     archive_names = make_archive_names(paths)
-    expected_members = _expected_archive_members(paths, archive_names)
+    inventory = _archive_inventory(paths, archive_names)
+    expected_members = [name for _, name in inventory]
     base = make_archive_base(out_dir)
     final_archive = out_dir / f"{base}.7z"
-    final_txt = out_dir / f"{base}.txt"
     temp_archive = out_dir / f".{base}.working.7z"
-    temp_txt = out_dir / f".{base}.working.txt"
     password = make_password()
+    temp_record: Path | None = None
+    record_published = False
+    archive_published = False
 
     try:
         _notify_progress(progress_callback, "正在加密打包，请不要关闭工具……")
         with py7zr.SevenZipFile(str(temp_archive), mode="w", password=password) as archive:
             archive.set_encrypted_header(True)
-            for source, archive_name in zip(paths, archive_names):
-                if source.is_dir():
-                    archive.writeall(str(source), arcname=archive_name)
-                else:
-                    archive.write(str(source), arcname=archive_name)
+            # writeall() skips the current working directory itself in py7zr.
+            # write() preserves every explicitly inventoried entry, even cwd.
+            for actual_path, member_name in inventory:
+                archive.write(str(actual_path), arcname=member_name)
 
         if not temp_archive.exists() or temp_archive.stat().st_size == 0:
             raise RuntimeError("压缩组件没有生成有效的 7z 文件。")
@@ -435,9 +475,7 @@ def create_encrypted_bundle(
         with py7zr.SevenZipFile(str(temp_archive), mode="r", password=password) as check:
             names = check.getnames()
             actual_keys = [_archive_key(name.rstrip("/")) for name in names]
-            expected_keys = [
-                _archive_key(name.rstrip("/")) for name in expected_members
-            ]
+            expected_keys = [_archive_key(name.rstrip("/")) for name in expected_members]
             if (
                 len(actual_keys) != len(set(actual_keys))
                 or set(actual_keys) != set(expected_keys)
@@ -448,7 +486,6 @@ def create_encrypted_bundle(
                     "压缩包成员与预期目录树不一致。"
                     f"缺失：{missing!r}；多出：{extra!r}"
                 )
-
             bad_member = check.testzip()
             if bad_member is not None:
                 raise RuntimeError(f"压缩包完整性检查失败：{bad_member}")
@@ -462,33 +499,45 @@ def create_encrypted_bundle(
             f"加密后的文件名：{base}.7z\n"
             f"密码：{password}\n"
             f"是否已加密文件名：是\n"
+            "警告：此 TXT 包含完整明文密码，须与压缩包分开安全保管。\n"
         )
-        with open(temp_txt, "w", encoding="utf-8-sig", newline="\r\n") as stream:
+
+        # Create and sync the record in its *own* directory, not next to .7z.
+        fd, temporary_name = tempfile.mkstemp(
+            prefix=".7z-password-", suffix=".working", dir=record.parent
+        )
+        temp_record = Path(temporary_name)
+        with os.fdopen(fd, "w", encoding="utf-8-sig", newline="\r\n") as stream:
             stream.write(txt_content)
             stream.flush()
             os.fsync(stream.fileno())
 
-        if final_archive.exists() or final_txt.exists():
-            raise FileExistsError("输出目录中出现同名文件，请重新执行。")
+        if os.path.lexists(record) or os.path.lexists(final_archive):
+            raise FileExistsError("目标文件已存在，拒绝覆盖，请重新选择位置。")
 
-        # 先发布 TXT，再发布 7z；失败时回滚 TXT，避免孤立的正式加密包。
-        os.rename(temp_txt, final_txt)
-        try:
-            os.rename(temp_archive, final_archive)
-        except BaseException:
+        # Publish secret first. Never publish a usable archive without a
+        # successfully persisted password; roll the secret back if .7z fails.
+        os.rename(temp_record, record)
+        record_published = True
+        os.rename(temp_archive, final_archive)
+        archive_published = True
+        return str(final_archive), str(record)
+    except BaseException:
+        if not archive_published and record_published:
             try:
-                final_txt.unlink(missing_ok=True)
+                record.unlink(missing_ok=True)
             except OSError:
-                logging.exception("压缩包发布失败后，无法回滚密码记录：%s", final_txt)
-            raise
-
-        return str(final_archive), str(final_txt)
+                logging.exception("发布失败后无法回滚密码记录：%s", record)
+        raise
     finally:
-        for temporary_path in (temp_archive, temp_txt):
+        for temporary_path in (temp_archive, temp_record):
+            if temporary_path is None:
+                continue
             try:
                 temporary_path.unlink(missing_ok=True)
             except OSError:
                 logging.warning("无法清理临时文件：%s", temporary_path, exc_info=True)
+
 
 def run_packaged_self_test(report_path: str | None = None) -> int:
     """由 CI 直接运行打包后的 EXE，检查依赖和真实文件夹加密往返。"""
@@ -538,16 +587,34 @@ def run_packaged_self_test(report_path: str | None = None) -> int:
             source_dir = root / "smoke-test-folder"
             empty_dir = source_dir / "nested" / "empty"
             payload = source_dir / "nested" / "payload.txt"
-            archive_path = root / "smoke-test.7z"
+            output_dir = root / "archives"
+            secret_dir = root / "private-passwords"
+            record_path = secret_dir / "record.txt"
             extract_dir = root / "extracted"
-
             empty_dir.mkdir(parents=True)
+            output_dir.mkdir()
+            secret_dir.mkdir()
             payload.write_bytes(b"7z folder encryption tool packaged self-test\n")
-            password = "SelfTest-" + secrets.token_urlsafe(24)
 
-            with py7zr.SevenZipFile(str(archive_path), mode="w", password=password) as archive:
-                archive.set_encrypted_header(True)
-                archive.writeall(str(source_dir), arcname="smoke-test-folder")
+            # Exercise the production function from inside the source directory.
+            old_cwd = Path.cwd()
+            try:
+                os.chdir(source_dir)
+                produced_archive, produced_record = create_encrypted_bundle(
+                    [source_dir], str(output_dir), password_file=str(record_path)
+                )
+            finally:
+                os.chdir(old_cwd)
+            archive_path = Path(produced_archive)
+            if Path(produced_record) != record_path or not record_path.exists():
+                raise RuntimeError("业务流程未生成单独保存的密码记录。")
+            record_text = record_path.read_text(encoding="utf-8-sig")
+            password = next(
+                line.partition("：")[2] for line in record_text.splitlines()
+                if line.startswith("密码：")
+            )
+            if len(password) != PASSWORD_LENGTH:
+                raise RuntimeError("业务流程生成的密码长度错误。")
 
             try:
                 with py7zr.SevenZipFile(str(archive_path), mode="r", password=None) as archive:
@@ -571,7 +638,7 @@ def run_packaged_self_test(report_path: str | None = None) -> int:
                 if bad_member is not None:
                     raise RuntimeError(f"归档完整性自检失败：{bad_member}")
 
-            # testzip() 可能消耗 reader 的 worker 状态，重新打开后再解压。
+            # Reopen after testzip(): it can consume the reader's worker.
             extract_dir.mkdir()
             with py7zr.SevenZipFile(str(archive_path), mode="r", password=password) as archive:
                 archive.extractall(path=extract_dir)
@@ -593,6 +660,7 @@ def run_packaged_self_test(report_path: str | None = None) -> int:
                 "hidden_imports": sorted(modules),
                 "encrypted_header": header_encryption_verified,
                 "archive_round_trip": True,
+                "business_flow": True,
                 "directory_archive": True,
                 "empty_directory_preserved": True,
             }
@@ -620,8 +688,9 @@ def run_packaged_self_test(report_path: str | None = None) -> int:
     return exit_code
 
 class EncryptApp:
-    def __init__(self, root: tk.Tk):
+    def __init__(self, root: tk.Tk, log_file: Path | None = None):
         self.root = root
+        self.log_file = log_file
         self.is_busy = False
         self.queue_items: list[Path] = []
 
@@ -731,8 +800,8 @@ class EncryptApp:
         ttk.Label(
             frame,
             text=(
-                "密码会写入输出文件夹中的 TXT。请与压缩包分开保管。"
-                "加密或校验期间请勿强制结束程序。"
+                "密码 TXT 须单独选择保存目录，且包含完整明文密码。"
+                "请与压缩包分开安全保管；加密期间请勿强制结束程序。"
             ),
             wraplength=720,
             foreground="#555555",
@@ -862,6 +931,42 @@ class EncryptApp:
                 )
                 return
 
+        record_file = filedialog.asksaveasfilename(
+            title="单独选择明文密码 TXT 的保存位置（不可与压缩包同目录）",
+            defaultextension=".txt",
+            filetypes=[("文本文件", "*.txt")],
+            initialdir=str(Path.home()),
+            initialfile="7z-password.txt",
+            parent=self.root,
+        )
+        if not record_file:
+            self.status_var.set("已取消密码记录位置选择，未生成文件。")
+            return
+        record_path = Path(record_file).resolve()
+        if record_path.parent == output_path:
+            messagebox.showerror(
+                "密码位置无效",
+                "密码 TXT 不能与加密压缩包保存在同一个文件夹，请重新选择。",
+                parent=self.root,
+            )
+            return
+        if os.path.lexists(record_path):
+            messagebox.showerror(
+                "密码位置无效",
+                "所选密码记录文件已存在。为避免覆盖，请选择新文件名。",
+                parent=self.root,
+            )
+            return
+        if not messagebox.askokcancel(
+            "明文密码安全提示",
+            f"即将把完整解密密码写入以下明文 TXT：\n{record_path}\n\n"
+            "任何能读取该 TXT 的人都能解密压缩包。"
+            "请与压缩包分开安全保管。是否继续？",
+            parent=self.root,
+        ):
+            self.status_var.set("已取消明文密码保存，未生成文件。")
+            return
+
         selected = list(self.queue_items)
         self.is_busy = True
         self._set_controls_enabled(False)
@@ -877,7 +982,8 @@ class EncryptApp:
         def worker() -> None:
             try:
                 result = create_encrypted_bundle(
-                    selected, str(output_path), report_status
+                    selected, str(output_path), report_status,
+                    password_file=str(record_path),
                 )
                 self.root.after(
                     0, lambda: self.finish_success(result, len(selected))
@@ -915,7 +1021,7 @@ class EncryptApp:
     def finish_error(self, detail: str) -> None:
         self._finish_task()
         self.status_var.set("处理失败，原文件未被修改。")
-        log_hint = f"\n\n详细日志：{app_data_dir() / 'logs' / 'application.log'}"
+        log_hint = f"\n\n详细日志：{self.log_file}" if self.log_file and self.log_file.is_file() else ""
         messagebox.showerror("处理失败", detail + log_hint, parent=self.root)
 
     def on_close(self) -> None:
@@ -952,7 +1058,7 @@ def main() -> int:
             ttk.Style(root).theme_use("vista")
         except tk.TclError:
             pass
-        EncryptApp(root)
+        EncryptApp(root, log_file=log_file)
         root.mainloop()
         return 0
     except Exception as exc:

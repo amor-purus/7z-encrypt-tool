@@ -102,6 +102,7 @@ jobs:
           if (
             -not $result.ok -or
             -not $result.encrypted_header -or
+            -not $result.business_flow -or
             -not $result.archive_round_trip -or
             -not $result.directory_archive -or
             -not $result.empty_directory_preserved

@@ -1,4 +1,4 @@
-# 7z File Encryption Tool v1.2.0
+# 7z File Encryption Tool v1.3.0
 
 A standalone Windows 11 GUI application for creating AES-256 encrypted 7z archives from files, folders, or a mixed selection.
 
@@ -8,7 +8,8 @@ A standalone Windows 11 GUI application for creating AES-256 encrypted 7z archiv
 2. Verify its SHA-256 against `SHA256SUMS.txt`.
 3. Double-click the EXE. No Python installation, BAT launcher, virtual environment, pip, or administrator rights are required.
 4. Add files and/or folders to the queue, then click **Start encryption** and choose an output folder.
-5. Wait for compression and integrity verification to finish.
+5. Select a separate destination for the plaintext password TXT. The app warns you before writing a plaintext password.
+6. Wait for compression and integrity verification to finish.
 
 The EXE is a single-file, windowed PyInstaller build. It does not open a persistent console window. The first launch can take a little longer because PyInstaller extracts its bundled runtime to a temporary directory.
 
@@ -21,11 +22,13 @@ The EXE is a single-file, windowed PyInstaller build. It does not open a persist
 - Selecting a parent folder automatically subsumes any separately selected files or subfolders inside it, preventing duplicate packaging.
 - The output folder must be outside every selected source folder. The application blocks an output folder that is the source itself or one of its descendants, avoiding recursive inclusion of the archive being written.
 
-Each selected folder is stored under a top-level archive path and includes its nested directories, files, and empty directories. Conflicting names are disambiguated using parent-folder names or a numeric suffix. The companion TXT identifies each entry as a file or folder and records its exact path inside the archive.
+Each selected folder is stored under a top-level archive path and includes its nested directories, files, and empty directories. Conflicting names are disambiguated using parent-folder names or a numeric suffix. The password TXT identifies each entry as a file or folder and records its exact archive path. It must be saved to a separate directory, selected by the user.
 
-## Password-record design decision
+## Password-record safety
 
-The companion TXT intentionally stores the generated password as plaintext. This is an accepted product requirement, not a defect or an item for routine remediation. Do not remove, encrypt, obscure, relocate, or repeatedly flag this behavior unless the owner explicitly changes the requirement. See [Decision 0001](docs/decisions/0001-plaintext-password-companion-file.md).
+The application generates a 32-character password using Python's `secrets` module and keeps the 7z member names and data encrypted. Before starting encryption, you must select a password TXT destination **in a different directory** from the archive, and confirm a warning that the TXT contains the complete plaintext password.
+
+No password TXT is automatically written next to the archive. Existing password files are never overwritten. If saving the password fails, the verified archive is not published; temporary outputs are removed. When archive publication fails after saving the password, the tool attempts to roll back the password record. A two-file commit across directories is not power-failure atomic; an unexpected OS crash between the renames could leave an orphan password TXT, but never a released archive without a previously written password. See [Decision 0001](docs/decisions/0001-plaintext-password-companion-file.md).
 
 ## Unsigned releases and SHA-256 verification
 
@@ -48,12 +51,13 @@ CI artifacts are retained for 30 days. Release and CI EXE files are both unsigne
 
 - Creates standard 7z archives with AES-256 encryption and encrypted headers (member names are hidden).
 - Generates a random 32-character password and a random 10-character archive name.
-- Writes a companion TXT containing the password and original-to-archive path mappings, labeling folders as `[文件夹]`.
+- Saves a plaintext TXT containing the password and original-to-archive path mappings to a separate, explicitly selected location; never silently beside the archive.
 - Detects duplicate selections, symbolic-link aliases, and filesystem hard links where file identity is available.
 - Preserves nested folders and empty directories and verifies the complete expected archive member set.
 - Confirms that member names cannot be read without the password and runs the archive integrity check.
 - Does not delete, move, or modify original files.
-- Prevents a normal window close while encryption or verification is running.
+- Prevents a normal window close while encryption or verification is running, then restores GUI controls on failure.
+- Rejects colliding Unicode-normalized folder members before packaging, and writes every inventoried member explicitly (including cwd and empty directories).
 
 ## Logs
 

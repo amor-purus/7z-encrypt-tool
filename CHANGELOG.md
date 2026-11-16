@@ -1,5 +1,16 @@
 # Changelog
 
+## v1.3.0 — 2026-11-16
+
+- Preflight validation rejects internal NFC/case-folded archive-name collisions with both source paths; numeric fallback retries are limited.
+- Writes validated directory inventory members one-by-one rather than calling py7zr.writeall(), preserving root and empty directory entries when cwd lies inside the source tree.
+- Password TXT requires explicit separate destination and user confirmation about plaintext; failure prevents publishing the encrypted archive.
+- Failed archive/password publication cleans staging artifacts and attempts rollback, without touching original files.
+- Error display no longer creates the log directory; unavailable logs do not mask the task exception.
+- Expanded real-business-flow regression coverage and frozen-EXE self-test through create_encrypted_bundle.
+
+# Changelog
+
 ## Unreleased — build integrity and maintenance
 
 - Recorded plaintext companion-password storage as an accepted product design decision; routine reviews must not reopen it.

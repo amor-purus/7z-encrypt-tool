@@ -15,13 +15,16 @@ class DirectoryBundleTests(unittest.TestCase):
         self.root = Path(self.temp.name)
         self.output = self.root / "output"
         self.output.mkdir()
+        self.password_dir = self.root / "separate-passwords"
+        self.password_dir.mkdir()
 
     def tearDown(self) -> None:
         self.temp.cleanup()
 
     def _create_bundle(self, items: list[Path]) -> tuple[Path, Path, str, set[str]]:
         archive_name, txt_name = create_encrypted_bundle(
-            [str(item) for item in items], str(self.output)
+            [str(item) for item in items], str(self.output),
+            password_file=str(self.password_dir / "password.txt"),
         )
         archive_path = Path(archive_name)
         txt_path = Path(txt_name)
@@ -157,7 +160,8 @@ class DirectoryBundleTests(unittest.TestCase):
         (source / "original.txt").write_text("must not be archived", encoding="utf-8")
 
         with self.assertRaisesRegex(ValueError, "输出文件夹位于待加密文件夹内部"):
-            create_encrypted_bundle([str(source)], str(nested_output))
+            create_encrypted_bundle([str(source)], str(nested_output),
+                                    password_file=str(self.password_dir / "password.txt"))
 
         self.assertEqual(list(nested_output.iterdir()), [])
 

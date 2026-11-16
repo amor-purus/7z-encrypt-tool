@@ -17,6 +17,8 @@ class EncryptedBundleTests(unittest.TestCase):
             source_2025.mkdir()
             source_2026.mkdir()
             output.mkdir()
+            password_dir = root / "private-passwords"
+            password_dir.mkdir()
 
             file_2025 = source_2025 / "report.pdf"
             file_2026 = source_2026 / "report.pdf"
@@ -28,6 +30,7 @@ class EncryptedBundleTests(unittest.TestCase):
             archive_path, password_path = create_encrypted_bundle(
                 [str(file_2025), str(file_2026), str(unique_file), str(file_2025)],
                 str(output),
+                password_file=str(password_dir / "password.txt"),
             )
 
             archive = Path(archive_path)

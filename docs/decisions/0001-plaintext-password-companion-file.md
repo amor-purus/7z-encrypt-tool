@@ -1,18 +1,18 @@
-# Decision 0001: plaintext password companion file
+# Decision 0001: explicitly located plaintext password record
 
-- Status: **Accepted**
-- Scope: generated companion TXT files produced with encrypted 7z archives
+- Status: **Amended by owner for v1.3.0 (2026-11-16)**
+- Scope: plaintext recovery TXT generated for every successfully published encrypted 7z archive
 
 ## Decision
 
-The application writes the generated archive password in plaintext in the companion TXT file. This behavior is intentional and is part of the required product workflow.
+The complete generated password remains readable plaintext in a TXT recovery record, but the user **must explicitly select its destination** outside the archive's output directory. The GUI displays a clear plaintext-password warning and requires confirmation. The application must not silently create a password TXT beside the archive. An existing TXT is never overwritten.
 
-## Maintenance rule
-
-Treat this behavior as an accepted design decision, not a defect or an unresolved security finding. Routine code reviews, automated checks, release notes, and AI-assisted maintenance must not repeatedly warn about it or propose removing, encrypting, obscuring, relocating, or replacing the TXT password record.
-
-Change this decision only when the product owner explicitly requests a different password-storage workflow.
+Both products are considered successful only when the encrypted archive is verified, the password record has been durably written and the final archive published. On failure the application cleans up temporary files and rolls back a password record published during that failed attempt where possible. Source files remain untouched.
 
 ## Rationale
 
-The companion file is the user's deliberately chosen, direct recovery record for the generated archive password. The program must continue to generate it alongside the encrypted archive and preserve the password in readable text.
+A plaintext recovery record helps users preserve the decryption key, but automatic colocated storage creates unnecessary exposure. Explicit location selection balances recovery with the owner's updated storage requirement. Version 1.2.0 intentionally co-located password and archive; this decision supersedes that practice.
+
+## Power-loss boundary
+
+Atomic rename applies separately to each file, not as one cross-directory transaction. Password-first publication prevents a published encrypted archive without an already persisted password during ordinary operation; an abnormal process or OS crash can leave a password TXT without its archive. This is the chosen safety direction; it is not a claim of multi-file crash atomicity.
