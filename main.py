@@ -606,7 +606,7 @@ def run_packaged_self_test(report_path: str | None = None) -> int:
             finally:
                 os.chdir(old_cwd)
             archive_path = Path(produced_archive)
-            if Path(produced_record) != record_path or not record_path.exists():
+            if Path(produced_record).resolve() != record_path.resolve() or not record_path.exists():
                 raise RuntimeError("业务流程未生成单独保存的密码记录。")
             record_text = record_path.read_text(encoding="utf-8-sig")
             password = next(

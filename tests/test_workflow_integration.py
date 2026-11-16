@@ -38,7 +38,7 @@ class ProductionIntegrationTests(unittest.TestCase):
         archived, saved = create_encrypted_bundle(
             paths, str(self.out), password_file=str(record)
         )
-        self.assertEqual(Path(saved), record)
+        self.assertEqual(Path(saved).resolve(), record.resolve())
         return Path(archived), record, password_from_record(record)
 
     def test_unicode_normalization_collision_is_detected_before_output(self) -> None:
@@ -56,8 +56,8 @@ class ProductionIntegrationTests(unittest.TestCase):
         with self.assertRaises(ValueError) as caught:
             create_encrypted_bundle([folder], str(self.out),
                                     password_file=str(self.secrets / "unicode.txt"))
-        self.assertIn(str(composed), str(caught.exception))
-        self.assertIn(str(decomposed), str(caught.exception))
+        self.assertIn(str(composed.resolve()), str(caught.exception))
+        self.assertIn(str(decomposed.resolve()), str(caught.exception))
         self.assertEqual(list(self.out.iterdir()), [])
         self.assertEqual(list(self.secrets.iterdir()), [])
         self.assertEqual(composed.read_bytes(), b"one")
