@@ -64,7 +64,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          current_tag_sha="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${RELEASE_TAG}" --jq '.object.sha' 2>/dev/null || true)"
+          current_tag_sha="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${RELEASE_TAG}" --jq '.object.sha // empty' 2>/dev/null || true)"
+          if [[ "$current_tag_sha" == "null" || "$current_tag_sha" == "Not Found" ]]; then
+            current_tag_sha=""
+          fi
           if [[ -n "$current_tag_sha" && "$current_tag_sha" != "$EXPECTED_COMMIT" ]]; then
             echo "::error::A tag exists but points at the wrong commit."
             exit 1
