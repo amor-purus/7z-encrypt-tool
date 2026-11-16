@@ -65,7 +65,10 @@ jobs:
         run: |
           set -euo pipefail
           current_tag_sha="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${RELEASE_TAG}" --jq '.object.sha // empty' 2>/dev/null || true)"
-          if [[ "$current_tag_sha" == "null" || "$current_tag_sha" == "Not Found" ]]; then
+          echo "Tag lookup (safe ref value): [$current_tag_sha]"
+          if [[ ! "$current_tag_sha" =~ ^[0-9a-f]{40}$ ]]; then
+            # A missing Git ref may return a human-readable error string.
+            # Only a valid object SHA is evidence that a tag actually exists.
             current_tag_sha=""
           fi
           if [[ -n "$current_tag_sha" && "$current_tag_sha" != "$EXPECTED_COMMIT" ]]; then
