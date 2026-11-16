@@ -1,4 +1,4 @@
-# 7z File Encryption Tool v1.3.0
+# 7z File Encryption Tool v1.4.0
 
 A standalone Windows 11 GUI application for creating AES-256 encrypted 7z archives from files, folders, or a mixed selection.
 
@@ -28,7 +28,7 @@ Each selected folder is stored under a top-level archive path and includes its n
 
 The application generates a 32-character password using Python's `secrets` module and keeps the 7z member names and data encrypted. Before starting encryption, you must select a password TXT destination **in a different directory** from the archive, and confirm a warning that the TXT contains the complete plaintext password.
 
-No password TXT is automatically written next to the archive. Existing password files are never overwritten. If saving the password fails, the verified archive is not published; temporary outputs are removed. When archive publication fails after saving the password, the tool attempts to roll back the password record. A two-file commit across directories is not power-failure atomic; an unexpected OS crash between the renames could leave an orphan password TXT, but never a released archive without a previously written password. See [Decision 0001](docs/decisions/0001-plaintext-password-companion-file.md).
+No password TXT is automatically written next to the archive. Existing password files are never overwritten. If saving the password fails, the verified archive is not published; temporary outputs are cleaned. On ordinary publication failure the password record is rolled back when the archive is demonstrably absent. If archive publication succeeds or its state cannot be confirmed, the password is **retained**, even when an asynchronous exception is raised. A cross-directory two-file transaction and power-loss durability cannot be guaranteed; a terminated process can leave recoverable staging files or an orphan password record. See [Decision 0001](docs/decisions/0001-plaintext-password-companion-file.md).
 
 ## Unsigned releases and SHA-256 verification
 
@@ -57,7 +57,20 @@ CI artifacts are retained for 30 days. Release and CI EXE files are both unsigne
 - Confirms that member names cannot be read without the password and runs the archive integrity check.
 - Does not delete, move, or modify original files.
 - Prevents a normal window close while encryption or verification is running, then restores GUI controls on failure.
-- Rejects colliding Unicode-normalized folder members before packaging, and writes every inventoried member explicitly (including cwd and empty directories).
+- Rejects colliding Unicode-normalized folder members before packaging; recognizes distinct files in case-sensitive NTFS directories and writes every inventoried member explicitly (including cwd and empty directories).
+- Detects source files or directory layout changed during packaging, preventing a false-success archive from a changed input set.
+- Uses exclusive staging and SHA-256 rechecks to detect modification of the encrypted staging file before publication.
+
+## Interrupted-task recovery and durability boundary
+
+If the process is terminated abruptly, its cleanup code cannot run. Before a new task, the app scans the selected archive/password directories for recognizable staging files and warns you. It does **not** automatically delete potentially recoverable plaintext passwords.
+
+- Archive staging names: `.7z-archive-*.incomplete.7z`. They contain encrypted archives but are not automatically considered finished.
+- Password staging names: `.7z-password-PLAINTEXT-*.incomplete.txt`. **These may contain the full plaintext password.** Treat them as secrets. Check associated archive/name, recover the key if necessary, then remove abandoned files manually.
+- A final password TXT can exist without its archive after a crash. It identifies the expected random 7z archive name.
+- Files are flushed to storage before publication; directory metadata is fsynced where supported. Neither this nor two renames on separate directories provides a power-failure-atomic transaction on Windows or other operating systems.
+
+Archive staging uses a random exclusive file handle and SHA-256 post-verification checks. This detects ordinary tampering before publication, but **does not protect files in hostile or shared directories** against a concurrent actor with write permission, nor does it guarantee an immutable snapshot of a source changed by another process. The tool rejects detectable source changes; use a stable source directory and trusted private output/password locations.
 
 ## Logs
 

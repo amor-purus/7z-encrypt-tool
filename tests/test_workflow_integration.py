@@ -128,7 +128,14 @@ class ProductionIntegrationTests(unittest.TestCase):
     def test_password_save_failure_does_not_publish_archive(self) -> None:
         source = self.root / "source.txt"
         source.write_bytes(b"keep me")
-        with mock.patch("main.tempfile.mkstemp", side_effect=PermissionError("password denied")):
+        real_mkstemp = tempfile.mkstemp
+
+        def deny_password_stage(*args, **kwargs):
+            if str(kwargs.get("prefix", "")).startswith(".7z-password-PLAINTEXT-"):
+                raise PermissionError("password denied")
+            return real_mkstemp(*args, **kwargs)
+
+        with mock.patch("main.tempfile.mkstemp", side_effect=deny_password_stage):
             with self.assertRaisesRegex(PermissionError, "password denied"):
                 self.bundle([source])
         self.assertEqual(list(self.out.iterdir()), [])

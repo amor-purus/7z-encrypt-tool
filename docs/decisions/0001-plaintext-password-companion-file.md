@@ -1,6 +1,6 @@
 # Decision 0001: explicitly located plaintext password record
 
-- Status: **Amended by owner for v1.3.0 (2026-11-16)**
+- Status: **Amended by owner for v1.3.0; hardened in v1.4.0 (2026-11-16)**
 - Scope: plaintext recovery TXT generated for every successfully published encrypted 7z archive
 
 ## Decision
@@ -16,3 +16,7 @@ A plaintext recovery record helps users preserve the decryption key, but automat
 ## Power-loss boundary
 
 Atomic rename applies separately to each file, not as one cross-directory transaction. Password-first publication prevents a published encrypted archive without an already persisted password during ordinary operation; an abnormal process or OS crash can leave a password TXT without its archive. This is the chosen safety direction; it is not a claim of multi-file crash atomicity.
+
+## v1.4.0 exception and recovery policy
+
+The password record is published before its encrypted archive. If an archive rename's result is ambiguous or a successfully published archive is interrupted before returning, **the password must not be deleted**. Ordinary errors that demonstrably precede archive publication roll back the password when possible; errors that leave an orphan TXT must make its path visible. Staging TXT files are named as containing plaintext, are never silently deleted after an abnormal termination, and are discovered on the next task's selected paths. Storage-device power failure, hostile writers in shared output directories, and uncoordinated source edits remain explicit limits, not guaranteed atomic transactions.

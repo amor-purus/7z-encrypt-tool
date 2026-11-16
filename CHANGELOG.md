@@ -1,5 +1,15 @@
 # Changelog
 
+## v1.4.0 — 2026-11-16
+
+- Fixed silent loss of distinct case-sensitive NTFS entries during input deduplication and ancestor checks using filesystem identity rather than case-folded path comparisons.
+- Restored GUI controls/close on thread constructor or Thread.start failures; logging fallback is now a non-throwing NullHandler with best-effort diagnostic calls.
+- Protected the only password after an asynchronous exception immediately following archive publication; conservative cleanup avoids deleting the key when the archive may already exist.
+- Added exclusive staging file creation/handle binding, SHA-256 revalidation immediately before publication, input stat and directory re-inventory checks, and no-clobber publication.
+- fsyncs the archive and password staging contents and POSIX directories where supported; documents that cross-directory crash/OS-power-loss atomicity remains impossible.
+- Detects incomplete encrypted archive staging and potentially plaintext recovery TXT files at new task setup, warns without deleting evidence.
+- Adds Windows NTFS case-sensitive production integration checks, GUI thread-start and closed-stderr fault tests, post-publication interrupt, archive overwrite, source mutation and recovery-file tests.
+
 ## v1.3.0 — 2026-11-16
 
 - Preflight validation rejects internal NFC/case-folded archive-name collisions with both source paths; numeric fallback retries are limited.

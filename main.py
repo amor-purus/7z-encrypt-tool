@@ -7,6 +7,8 @@
 from __future__ import annotations
 
 import ctypes
+import hashlib
+import stat
 import json
 import logging
 import os
@@ -26,7 +28,7 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
 APP_TITLE = "文件加密工具"
-APP_VERSION = "1.3.0"
+APP_VERSION = "1.4.0"
 PASSWORD_LENGTH = 32
 ARCHIVE_NAME_LENGTH = 10
 
@@ -58,16 +60,8 @@ def configure_logging() -> Path | None:
         # PyInstaller --windowed may set sys.stderr to None.  A default
         # StreamHandler would then raise while reporting the logging failure.
         # Keep the original task exception displayable even without any stream.
-        stderr = getattr(sys, "stderr", None)
-        handler = logging.StreamHandler(stderr) if stderr is not None else logging.NullHandler()
-        logging.basicConfig(
-            handlers=[handler],
-            level=logging.ERROR,
-            format="%(asctime)s %(levelname)s %(threadName)s %(message)s",
-            force=True,
-        )
-        if stderr is not None:
-            logging.exception("Could not initialize the application log file")
+        # A redirected stderr may be closed at any time. Never depend on it.
+        logging.basicConfig(handlers=[logging.NullHandler()], level=logging.ERROR, force=True)
         return None
 
 
@@ -89,7 +83,7 @@ def enable_windows_dpi_awareness() -> None:
     try:
         ctypes.windll.user32.SetProcessDPIAware()
     except (AttributeError, OSError):
-        logging.exception("Could not enable Windows DPI awareness")
+        _safe_log("Could not enable Windows DPI awareness")
 
 
 def make_password(length: int = PASSWORD_LENGTH) -> str:
@@ -322,39 +316,60 @@ def make_archive_names(items: list[Path]) -> list[str]:
     return [name.replace("\\", "/") for name in result if name is not None]
 
 
+def _file_identity(path: Path) -> tuple[int, int] | None:
+    """Compare objects by filesystem identity, never by case-folded spelling."""
+    info = path.stat()
+    return (info.st_dev, info.st_ino) if info.st_ino else None
+
+
+def _same_fs_entry(first: Path, second: Path) -> bool:
+    first_id = _file_identity(first)
+    second_id = _file_identity(second)
+    if first_id is not None and second_id is not None:
+        return first_id == second_id
+    return first.samefile(second)
+
+
+def _inside_actual_directory(path: Path, directory: Path) -> bool:
+    """Physical ancestor check; WindowsPath's case-insensitive test is unsafe on case-sensitive NTFS."""
+    candidate = path
+    while True:
+        if _same_fs_entry(candidate, directory):
+            return True
+        ancestor = candidate.parent
+        if ancestor == candidate:
+            return False
+        candidate = ancestor
+
+
 def deduplicate_items(items: list[str | Path]) -> list[Path]:
-    """解析路径、按文件身份去重，并自动移除已被父文件夹包含的条目。"""
+    """Drop only actual filesystem duplicates/children, never case-only distinct inputs."""
     resolved: list[Path] = []
-    seen_paths: set[str] = set()
     seen_file_ids: set[tuple[int, int]] = set()
+    seen_exact_paths: set[str] = set()
 
     for item in items:
-        path = Path(item).resolve()
+        path = Path(item).resolve(strict=True)
         if not path.is_file() and not path.is_dir():
             raise FileNotFoundError(f"找不到文件或文件夹：{path}")
-
-        path_key = os.path.normcase(str(path))
-        if path_key in seen_paths:
-            continue
-
-        stat = path.stat()
-        file_id = (stat.st_dev, stat.st_ino)
-        if stat.st_ino and file_id in seen_file_ids:
-            continue
-
-        seen_paths.add(path_key)
-        if stat.st_ino:
+        file_id = _file_identity(path)
+        if file_id is not None:
+            if file_id in seen_file_ids:
+                continue
             seen_file_ids.add(file_id)
+        else:
+            if str(path) in seen_exact_paths:
+                continue
+            seen_exact_paths.add(str(path))
         resolved.append(path)
 
-    # 不论父文件夹是在队列中先添加还是后添加，都只保留父文件夹。
     return [
         path
         for path in resolved
         if not any(
-            parent != path
-            and parent.is_dir()
-            and path.is_relative_to(parent)
+            parent.is_dir()
+            and not _same_fs_entry(parent, path)
+            and _inside_actual_directory(path.parent, parent)
             for parent in resolved
         )
     ]
@@ -367,12 +382,27 @@ def deduplicate_files(items: list[str | Path]) -> list[Path]:
         raise FileNotFoundError("该操作只接受文件。")
     return paths
 
+def _safe_log(message: str, *args: object) -> None:
+    """Logging is best-effort and cannot interrupt GUI error recovery."""
+    try:
+        logging.exception(message, *args)
+    except Exception:
+        pass
+
+
+def _safe_warning(message: str, *args: object) -> None:
+    try:
+        logging.warning(message, *args, exc_info=True)
+    except Exception:
+        pass
+
+
 def _notify_progress(callback: Callable[[str], None] | None, message: str) -> None:
     if callback is not None:
         try:
             callback(message)
         except Exception:
-            logging.exception("进度通知失败")
+            _safe_log("进度通知失败")
 
 
 def _archive_inventory(
@@ -402,6 +432,87 @@ def _expected_archive_members(paths: list[Path], archive_names: list[str]) -> li
     return [name for _, name in _archive_inventory(paths, archive_names)]
 
 
+def _snapshot_entry(path: Path) -> tuple[int, int, int, int, int, int]:
+    """Track input identity, type and metadata; reject changed trees instead of silently succeeding."""
+    st = path.lstat()
+    return (st.st_dev, st.st_ino, stat.S_IFMT(st.st_mode),
+            st.st_size, st.st_mtime_ns, st.st_ctime_ns)
+
+
+def _verify_inventory_unchanged(
+    paths: list[Path],
+    archive_names: list[str],
+    inventory: list[tuple[Path, str]],
+    original: list[tuple[int, int, int, int, int, int]],
+) -> None:
+    current = _archive_inventory(paths, archive_names)
+    if [(str(p), n) for p, n in current] != [(str(p), n) for p, n in inventory]:
+        raise RuntimeError("源目录在打包过程中发生增删或重命名，已停止任务。")
+    for (path, _), snapshot in zip(inventory, original):
+        if _snapshot_entry(path) != snapshot:
+            raise RuntimeError(f"源文件或文件夹在打包过程中发生变化：{path}")
+
+
+def _archive_digest(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _publish_without_overwrite(source: Path, destination: Path) -> None:
+    """Atomically publish a complete file without overwriting an existing destination."""
+    if os.name == "nt":
+        # Windows MoveFile does not replace an existing destination.
+        os.rename(source, destination)
+    else:
+        # POSIX rename would overwrite; hard-link creation is O_EXCL-like.
+        os.link(source, destination)
+        source.unlink()
+
+
+def _sync_directory_if_supported(folder: Path) -> None:
+    """Durability enhancement on POSIX; Windows directory flush is not portable."""
+    if os.name == "nt":
+        return
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    fd = os.open(folder, flags)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def find_interrupted_artifacts(output_dir: Path, password_dir: Path) -> list[Path]:
+    """Identify rather than silently remove artifacts from abnormal termination."""
+    found: list[Path] = []
+    for folder, pattern in (
+        (output_dir, ".7z-archive-*.incomplete.7z"),
+        (password_dir, ".7z-password-PLAINTEXT-*.incomplete.txt"),
+    ):
+        try:
+            for candidate in folder.glob(pattern):
+                found.append(candidate)
+                if len(found) >= 12:
+                    return found
+        except OSError:
+            _safe_warning("无法扫描遗留的未完成文件：%s", folder)
+    return found
+
+
+def _is_our_published_file(target: Path, identity: tuple[int, int] | None) -> bool | None:
+    """Tri-state: True=ours, False=absent/different, None=identity uncertain."""
+    try:
+        if not os.path.lexists(target):
+            return False
+        if identity is None:
+            return None
+        return _file_identity(target) == identity
+    except OSError:
+        return None
+
+
 def create_encrypted_bundle(
     items: list[str | Path],
     output_folder: str,
@@ -409,9 +520,10 @@ def create_encrypted_bundle(
     *,
     password_file: str | None = None,
 ) -> tuple[str, str]:
-    """全部验证通过后才发布归档与单独指定的明文密码记录。
+    """Validate, encrypt, verify and publish password-first with conservative recovery.
 
-    密码记录必须在另一个目录；两个文件分别原子重命名，失败则回滚。
+    This is exception-safe, not a cross-directory crash transaction. Once the
+    encrypted archive might be public, NEVER delete its only password record.
     """
     try:
         import py7zr
@@ -422,53 +534,60 @@ def create_encrypted_bundle(
     if not paths:
         raise ValueError("没有选择文件或文件夹。")
 
-    out_dir = Path(output_folder).resolve()
+    out_dir = Path(output_folder).resolve(strict=True)
     if not out_dir.is_dir():
         raise NotADirectoryError("输出位置无效。")
     if not password_file:
         raise ValueError("必须单独选择明文密码 TXT 的保存位置。")
-
     record = Path(password_file).resolve()
-    if not record.parent.is_dir() or record.parent == out_dir:
+    if not record.parent.is_dir() or _same_fs_entry(record.parent, out_dir):
         raise ValueError("密码 TXT 必须保存到存在的、不同于压缩包输出目录的文件夹。")
     if os.path.lexists(record):
         raise FileExistsError(f"密码记录目标已存在，拒绝覆盖：{record}")
 
-    # No source modification, including accidental plaintext password creation.
     for source in paths:
         if source.is_dir():
-            if out_dir == source or out_dir.is_relative_to(source):
-                raise ValueError(
-                    f"输出文件夹位于待加密文件夹内部：{source}\n"
-                    "请将输出位置更换到该源文件夹之外。"
-                )
-            if record.is_relative_to(source):
+            if _inside_actual_directory(out_dir, source):
+                raise ValueError(f"输出文件夹位于待加密文件夹内部：{source}\n请更换到源文件夹之外。")
+            if _inside_actual_directory(record.parent, source):
                 raise ValueError(f"密码记录不能写入待加密源文件夹：{source}")
-        elif record == source:
-            raise ValueError(f"密码记录不能覆盖待加密源文件：{source}")
 
     archive_names = make_archive_names(paths)
     inventory = _archive_inventory(paths, archive_names)
+    original_snapshots = [_snapshot_entry(path) for path, _ in inventory]
     expected_members = [name for _, name in inventory]
     base = make_archive_base(out_dir)
     final_archive = out_dir / f"{base}.7z"
-    temp_archive = out_dir / f".{base}.working.7z"
     password = make_password()
+    temp_archive: Path | None = None
     temp_record: Path | None = None
-    record_published = False
-    archive_published = False
+    archive_id: tuple[int, int] | None = None
+    record_id: tuple[int, int] | None = None
 
     try:
         _notify_progress(progress_callback, "正在加密打包，请不要关闭工具……")
-        with py7zr.SevenZipFile(str(temp_archive), mode="w", password=password) as archive:
-            archive.set_encrypted_header(True)
-            # writeall() skips the current working directory itself in py7zr.
-            # write() preserves every explicitly inventoried entry, even cwd.
-            for actual_path, member_name in inventory:
-                archive.write(str(actual_path), arcname=member_name)
+        archive_fd, archive_name = tempfile.mkstemp(
+            prefix=f".7z-archive-{base}-", suffix=".incomplete.7z", dir=out_dir
+        )
+        temp_archive = Path(archive_name)
 
-        if not temp_archive.exists() or temp_archive.stat().st_size == 0:
+        # The already-exclusively-created file descriptor stays bound to the
+        # original object during writing; no second path-based "w" open.
+        with os.fdopen(archive_fd, "w+b") as archive_stream:
+            with py7zr.SevenZipFile(archive_stream, mode="w", password=password) as archive:
+                archive.set_encrypted_header(True)
+                for (actual_path, member_name), snapshot in zip(inventory, original_snapshots):
+                    if _snapshot_entry(actual_path) != snapshot:
+                        raise RuntimeError(f"打包前源文件已被修改：{actual_path}")
+                    archive.write(str(actual_path), arcname=member_name)
+                    if _snapshot_entry(actual_path) != snapshot:
+                        raise RuntimeError(f"打包期间源文件已被修改：{actual_path}")
+            archive_stream.flush()
+            os.fsync(archive_stream.fileno())
+
+        if temp_archive.stat().st_size == 0:
             raise RuntimeError("压缩组件没有生成有效的 7z 文件。")
+        archive_id = _file_identity(temp_archive)
 
         _notify_progress(progress_callback, "正在校验文件头加密和压缩包完整性……")
         try:
@@ -483,10 +602,7 @@ def create_encrypted_bundle(
             names = check.getnames()
             actual_keys = [_archive_key(name.rstrip("/")) for name in names]
             expected_keys = [_archive_key(name.rstrip("/")) for name in expected_members]
-            if (
-                len(actual_keys) != len(set(actual_keys))
-                or set(actual_keys) != set(expected_keys)
-            ):
+            if len(actual_keys) != len(set(actual_keys)) or set(actual_keys) != set(expected_keys):
                 missing = sorted(set(expected_keys) - set(actual_keys))
                 extra = sorted(set(actual_keys) - set(expected_keys))
                 raise RuntimeError(
@@ -496,6 +612,9 @@ def create_encrypted_bundle(
             bad_member = check.testzip()
             if bad_member is not None:
                 raise RuntimeError(f"压缩包完整性检查失败：{bad_member}")
+
+        _verify_inventory_unchanged(paths, archive_names, inventory, original_snapshots)
+        verified_digest = _archive_digest(temp_archive)
 
         mappings = "\n".join(
             f"- [{'文件夹' if source.is_dir() else '文件'}] {source.name} -> {archive_name}"
@@ -508,33 +627,50 @@ def create_encrypted_bundle(
             f"是否已加密文件名：是\n"
             "警告：此 TXT 包含完整明文密码，须与压缩包分开安全保管。\n"
         )
-
-        # Create and sync the record in its *own* directory, not next to .7z.
-        fd, temporary_name = tempfile.mkstemp(
-            prefix=".7z-password-", suffix=".working", dir=record.parent
+        # Residuals after an abnormal crash are deliberately conspicuous:
+        # incomplete TXT can contain the complete plaintext password.
+        password_fd, password_name = tempfile.mkstemp(
+            prefix=f".7z-password-PLAINTEXT-{base}-",
+            suffix=".incomplete.txt", dir=record.parent
         )
-        temp_record = Path(temporary_name)
-        with os.fdopen(fd, "w", encoding="utf-8-sig", newline="\r\n") as stream:
+        temp_record = Path(password_name)
+        with os.fdopen(password_fd, "w", encoding="utf-8-sig", newline="\r\n") as stream:
             stream.write(txt_content)
             stream.flush()
             os.fsync(stream.fileno())
 
+        _verify_inventory_unchanged(paths, archive_names, inventory, original_snapshots)
+        if _file_identity(temp_archive) != archive_id or _archive_digest(temp_archive) != verified_digest:
+            raise RuntimeError("校验完成后暂存归档发生变化，已取消发布。")
         if os.path.lexists(record) or os.path.lexists(final_archive):
             raise FileExistsError("目标文件已存在，拒绝覆盖，请重新选择位置。")
 
-        # Publish secret first. Never publish a usable archive without a
-        # successfully persisted password; roll the secret back if .7z fails.
-        os.rename(temp_record, record)
-        record_published = True
-        os.rename(temp_archive, final_archive)
-        archive_published = True
+        record_id = _file_identity(temp_record)
+        _publish_without_overwrite(temp_record, record)
+        _sync_directory_if_supported(record.parent)
+        # The verified archive cannot be published unless the password has
+        # already been durably written and renamed to its selected location.
+        _publish_without_overwrite(temp_archive, final_archive)
+        _sync_directory_if_supported(out_dir)
         return str(final_archive), str(record)
-    except BaseException:
-        if not archive_published and record_published:
+    except BaseException as exc:
+        # Do NOT use a boolean assigned AFTER the publish call: an async
+        # exception between rename() and assignment can delete the ONLY key.
+        archive_state = _is_our_published_file(final_archive, archive_id)
+        if archive_state is False and _is_our_published_file(record, record_id) is True:
             try:
-                record.unlink(missing_ok=True)
+                record.unlink()
+                _sync_directory_if_supported(record.parent)
             except OSError:
-                logging.exception("发布失败后无法回滚密码记录：%s", record)
+                _safe_log("失败后无法回滚明文密码记录：%s", record)
+        elif archive_state is not False and os.path.lexists(record):
+            # Keep the secret if the archive was published or its status is
+            # uncertain; a recoverable orphan password is safer than key loss.
+            if isinstance(exc, Exception):
+                raise RuntimeError(
+                    f"{exc}\n归档发布状态不确定；密码记录已保留在：{record}\n"
+                    "请检查压缩包与密码记录，切勿删除唯一密码。"
+                ) from exc
         raise
     finally:
         for temporary_path in (temp_archive, temp_record):
@@ -543,7 +679,7 @@ def create_encrypted_bundle(
             try:
                 temporary_path.unlink(missing_ok=True)
             except OSError:
-                logging.warning("无法清理临时文件：%s", temporary_path, exc_info=True)
+                _safe_warning("无法清理暂存文件（可能包含明文密码）：%s", temporary_path)
 
 
 def run_packaged_self_test(report_path: str | None = None) -> int:
@@ -824,7 +960,7 @@ class EncryptApp:
         )
 
     def report_callback_exception(self, exc_type, exc_value, trace) -> None:
-        logging.error("Tkinter 回调异常", exc_info=(exc_type, exc_value, trace))
+        _safe_log("Tkinter 回调异常")
         detail = str(exc_value) or exc_type.__name__
         messagebox.showerror("程序错误", detail, parent=self.root)
 
@@ -926,9 +1062,7 @@ class EncryptApp:
 
         output_path = Path(output_folder).resolve()
         for source in self.queue_items:
-            if source.is_dir() and (
-                output_path == source or output_path.is_relative_to(source)
-            ):
+            if source.is_dir() and _inside_actual_directory(output_path, source):
                 messagebox.showerror(
                     "输出位置无效",
                     "输出文件夹不能位于待加密文件夹本身或其子文件夹中。\n"
@@ -964,6 +1098,18 @@ class EncryptApp:
                 parent=self.root,
             )
             return
+        interrupted = find_interrupted_artifacts(output_path, record_path.parent)
+        if interrupted:
+            details = "\n".join(str(path) for path in interrupted[:5])
+            if not messagebox.askokcancel(
+                "检测到上次中断留下的文件",
+                "发现以前中断任务的暂存文件。未完成的密码 TXT 可能包含完整明文密码。"
+                "工具不会自动删除它们，请先核对并安全处理。\n\n"
+                + details + "\n\n是否仍要继续本次任务？",
+                parent=self.root,
+            ):
+                self.status_var.set("已暂停：请先检查上次中断任务留下的文件。")
+                return
         if not messagebox.askokcancel(
             "明文密码安全提示",
             f"即将把完整解密密码写入以下明文 TXT：\n{record_path}\n\n"
@@ -984,7 +1130,7 @@ class EncryptApp:
             try:
                 self.root.after(0, self.status_var.set, message)
             except tk.TclError:
-                logging.warning("窗口已关闭，无法更新处理状态")
+                _safe_warning("窗口已关闭，无法更新处理状态")
 
         def worker() -> None:
             try:
@@ -997,22 +1143,28 @@ class EncryptApp:
                 )
             except Exception as exc:
                 detail = str(exc) or type(exc).__name__
-                logging.exception("加密任务失败")
+                _safe_log("加密任务失败")
                 try:
                     self.root.after(
                         0, lambda: self.finish_error(detail)
                     )
                 except tk.TclError:
-                    logging.exception("无法向窗口报告加密失败")
+                    _safe_log("无法向窗口报告加密失败")
 
-        threading.Thread(
-            target=worker, daemon=False, name="archive-worker"
-        ).start()
+        try:
+            threading.Thread(
+                target=worker, daemon=False, name="archive-worker"
+            ).start()
+        except Exception as exc:
+            _safe_log("工作线程启动失败")
+            self.finish_error(str(exc) or type(exc).__name__)
 
     def _finish_task(self) -> None:
         self.is_busy = False
-        self.progress.stop()
-        self._set_controls_enabled(True)
+        try:
+            self.progress.stop()
+        finally:
+            self._set_controls_enabled(True)
 
     def finish_success(self, result: tuple[str, str], count: int) -> None:
         self._finish_task()
@@ -1028,7 +1180,11 @@ class EncryptApp:
     def finish_error(self, detail: str) -> None:
         self._finish_task()
         self.status_var.set("处理失败，原文件未被修改。")
-        log_hint = f"\n\n详细日志：{self.log_file}" if self.log_file and self.log_file.is_file() else ""
+        try:
+            available_log = bool(self.log_file and self.log_file.is_file())
+        except OSError:
+            available_log = False
+        log_hint = f"\n\n详细日志：{self.log_file}" if available_log else ""
         messagebox.showerror("处理失败", detail + log_hint, parent=self.root)
 
     def on_close(self) -> None:
@@ -1069,13 +1225,13 @@ def main() -> int:
         root.mainloop()
         return 0
     except Exception as exc:
-        logging.exception("应用程序启动失败")
+        _safe_log("应用程序启动失败")
         detail = str(exc) or type(exc).__name__
         log_hint = f"\n\n详细日志：{log_file}" if log_file else ""
         try:
             messagebox.showerror("程序启动失败", detail + log_hint)
         except Exception:
-            logging.exception("无法显示启动错误")
+            _safe_log("无法显示启动错误")
         return 1
 
 
