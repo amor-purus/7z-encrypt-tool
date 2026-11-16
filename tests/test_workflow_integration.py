@@ -244,7 +244,10 @@ class GuiFailureRecoveryTests(unittest.TestCase):
         self._start_and_fail(OSError("archive write failed"))
 
     def test_log_directory_unavailable_preserves_original_error(self):
-        with mock.patch("main.app_data_dir", side_effect=PermissionError("logs blocked")):
+        with (
+            mock.patch("main.app_data_dir", side_effect=PermissionError("logs blocked")),
+            mock.patch("main.sys.stderr", None),
+        ):
             self.assertIsNone(main.configure_logging())
         with mock.patch("main.messagebox.showerror") as showerror:
             self.app.is_busy = True

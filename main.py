@@ -55,12 +55,19 @@ def configure_logging() -> Path | None:
         logging.info("Application started: version=%s frozen=%s", APP_VERSION, bool(getattr(sys, "frozen", False)))
         return log_file
     except OSError:
+        # PyInstaller --windowed may set sys.stderr to None.  A default
+        # StreamHandler would then raise while reporting the logging failure.
+        # Keep the original task exception displayable even without any stream.
+        stderr = getattr(sys, "stderr", None)
+        handler = logging.StreamHandler(stderr) if stderr is not None else logging.NullHandler()
         logging.basicConfig(
+            handlers=[handler],
             level=logging.ERROR,
             format="%(asctime)s %(levelname)s %(threadName)s %(message)s",
             force=True,
         )
-        logging.exception("Could not initialize the application log file")
+        if stderr is not None:
+            logging.exception("Could not initialize the application log file")
         return None
 
 

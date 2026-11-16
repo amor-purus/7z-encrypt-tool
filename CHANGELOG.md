@@ -6,7 +6,7 @@
 - Writes validated directory inventory members one-by-one rather than calling py7zr.writeall(), preserving root and empty directory entries when cwd lies inside the source tree.
 - Password TXT requires explicit separate destination and user confirmation about plaintext; failure prevents publishing the encrypted archive.
 - Failed archive/password publication cleans staging artifacts and attempts rollback, without touching original files.
-- Error display no longer creates the log directory; unavailable logs do not mask the task exception.
+- Error display no longer creates the log directory; unavailable logs do not mask the task exception, even when a windowed EXE has no stderr stream.
 - Expanded real-business-flow regression coverage and frozen-EXE self-test through create_encrypted_bundle.
 
 # Changelog
