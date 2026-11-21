@@ -27,10 +27,11 @@ from typing import Callable
 import tkinter as tk
 
 import crash_recovery as recovery
+import password_store
 from tkinter import filedialog, messagebox, ttk
 
 APP_TITLE = "文件加密工具"
-APP_VERSION = "1.5.0"
+APP_VERSION = "2.0.0"
 PASSWORD_LENGTH = 32
 ARCHIVE_NAME_LENGTH = 10
 
@@ -407,6 +408,23 @@ def _notify_progress(callback: Callable[[str], None] | None, message: str) -> No
             _safe_log("进度通知失败")
 
 
+class TaskCancelled(Exception):
+    """Cooperative cancellation before the publication point."""
+
+
+def _check_cancel(cancel_event: threading.Event | None) -> None:
+    if cancel_event is not None and cancel_event.is_set():
+        raise TaskCancelled("任务已安全取消，未发布新的加密文件。")
+
+
+def _notify_event(callback: Callable[[dict], None] | None, data: dict) -> None:
+    if callback is not None:
+        try:
+            callback(dict(data))
+        except Exception:
+            _safe_log("结构化进度通知失败")
+
+
 def _archive_inventory(
     paths: list[Path], archive_names: list[str]
 ) -> list[tuple[Path, str]]:
@@ -533,6 +551,9 @@ def create_encrypted_bundle(
     progress_callback: Callable[[str], None] | None = None,
     *,
     password_file: str | None = None,
+    password_mode: str = "plaintext",
+    event_callback: Callable[[dict], None] | None = None,
+    cancel_event: threading.Event | None = None,
 ) -> tuple[str, str]:
     """Run a journaled, cross-process-serialized publication transaction."""
     directory = _transaction_store()
@@ -546,6 +567,8 @@ def create_encrypted_bundle(
         return _create_encrypted_bundle_locked(
             items, output_folder, progress_callback,
             password_file=password_file, transaction_directory=directory,
+            password_mode=password_mode, event_callback=event_callback,
+            cancel_event=cancel_event,
         )
 
 
@@ -556,6 +579,9 @@ def _create_encrypted_bundle_locked(
     *,
     password_file: str | None = None,
     transaction_directory: Path,
+    password_mode: str = "plaintext",
+    event_callback: Callable[[dict], None] | None = None,
+    cancel_event: threading.Event | None = None,
 ) -> tuple[str, str]:
     """Validate, encrypt, verify and publish password-first with conservative recovery.
 
@@ -567,6 +593,11 @@ def _create_encrypted_bundle_locked(
     except ImportError as exc:
         raise RuntimeError("加密组件缺失，请重新下载完整的官方 EXE 版本。") from exc
 
+    if password_mode not in ("plaintext", "dpapi"):
+        raise ValueError("密码记录保存模式无效。")
+    if password_mode == "dpapi" and os.name != "nt":
+        raise OSError("DPAPI 保护模式仅支持 Windows。")
+    _check_cancel(cancel_event)
     paths = deduplicate_items(items)
     if not paths:
         raise ValueError("没有选择文件或文件夹。")
@@ -593,6 +624,12 @@ def _create_encrypted_bundle_locked(
     inventory = _archive_inventory(paths, archive_names)
     original_snapshots = [_snapshot_entry(path) for path, _ in inventory]
     expected_members = [name for _, name in inventory]
+    total_bytes = sum(snap[3] for snap in original_snapshots if snap[2] == stat.S_IFREG)
+    completed_bytes = 0
+    completed_entries = 0
+    _notify_event(event_callback, {"stage": "encrypt", "completed_bytes": 0,
+                                   "total_bytes": total_bytes, "completed_entries": 0,
+                                   "total_entries": len(inventory)})
     base = make_archive_base(out_dir)
     final_archive = out_dir / f"{base}.7z"
     password = make_password()
@@ -621,11 +658,20 @@ def _create_encrypted_bundle_locked(
             with py7zr.SevenZipFile(archive_stream, mode="w", password=password) as archive:
                 archive.set_encrypted_header(True)
                 for (actual_path, member_name), snapshot in zip(inventory, original_snapshots):
+                    _check_cancel(cancel_event)
                     if _snapshot_entry(actual_path) != snapshot:
                         raise RuntimeError(f"打包前源文件已被修改：{actual_path}")
                     archive.write(str(actual_path), arcname=member_name)
                     if _snapshot_entry(actual_path) != snapshot:
                         raise RuntimeError(f"打包期间源文件已被修改：{actual_path}")
+                    completed_entries += 1
+                    if snapshot[2] == stat.S_IFREG:
+                        completed_bytes += snapshot[3]
+                    _notify_event(event_callback, {
+                        "stage": "encrypt", "completed_bytes": completed_bytes,
+                        "total_bytes": total_bytes, "completed_entries": completed_entries,
+                        "total_entries": len(inventory)})
+                    _check_cancel(cancel_event)
             archive_stream.flush()
             os.fsync(archive_stream.fileno())
 
@@ -633,6 +679,8 @@ def _create_encrypted_bundle_locked(
             raise RuntimeError("压缩组件没有生成有效的 7z 文件。")
         archive_id = _file_identity(temp_archive)
 
+        _check_cancel(cancel_event)
+        _notify_event(event_callback, {"stage": "verify"})
         _notify_progress(progress_callback, "正在校验文件头加密和压缩包完整性……")
         try:
             with py7zr.SevenZipFile(str(temp_archive), mode="r", password=None) as no_password:
@@ -671,15 +719,16 @@ def _create_encrypted_bundle_locked(
             f"是否已加密文件名：是\n"
             "警告：此 TXT 包含完整明文密码，须与压缩包分开安全保管。\n"
         )
-        # Residuals after an abnormal crash are deliberately conspicuous:
-        # incomplete TXT can contain the complete plaintext password.
+        # Plaintext mode stores a sensitive temporary TXT. DPAPI mode uses ciphertext.
+        _check_cancel(cancel_event)
+        stored_record = password_store.encode_record(txt_content, password_mode)
         password_fd, password_name = tempfile.mkstemp(
             prefix=journal["record_prefix"],
             suffix=".incomplete.txt", dir=record.parent
         )
         temp_record = Path(password_name)
-        with os.fdopen(password_fd, "w", encoding="utf-8-sig", newline="\r\n") as stream:
-            stream.write(txt_content)
+        with os.fdopen(password_fd, "wb") as stream:
+            stream.write(stored_record)
             stream.flush()
             os.fsync(stream.fileno())
 
@@ -689,6 +738,9 @@ def _create_encrypted_bundle_locked(
         if os.path.lexists(record) or os.path.lexists(final_archive):
             raise FileExistsError("目标文件已存在，拒绝覆盖，请重新选择位置。")
 
+        _check_cancel(cancel_event)
+        # Once publication begins, cancellation is deliberately not admitted.
+        _notify_event(event_callback, {"stage": "publish"})
         record_id = _file_identity(temp_record)
         recovery.mark_ready(journal_path, journal, temp_archive, temp_record)
         _publish_without_overwrite(temp_record, record)
@@ -868,6 +920,32 @@ def run_packaged_self_test(report_path: str | None = None) -> int:
             ):
                 raise RuntimeError("文件夹归档解压后与原始目录树不一致。")
 
+            # Validate the optional Windows DPAPI mode from the frozen EXE
+            # itself, not only from source-level unit tests.
+            dpapi_archive_dir = root / "dpapi-archives"
+            dpapi_password_dir = root / "dpapi-passwords"
+            dpapi_archive_dir.mkdir()
+            dpapi_password_dir.mkdir()
+            dpapi_archive, dpapi_record = create_encrypted_bundle(
+                [payload], str(dpapi_archive_dir),
+                password_file=str(dpapi_password_dir / "protected.txt"),
+                password_mode="dpapi"
+            )
+            raw_record = Path(dpapi_record).read_bytes()
+            if not raw_record.startswith(password_store.MAGIC):
+                raise RuntimeError("打包后的 EXE 未能生成 DPAPI 受保护记录。")
+            decoded = password_store.decode_record(raw_record)
+            protected_password = next(
+                line.partition("：")[2] for line in decoded.splitlines()
+                if line.startswith("密码：")
+            )
+            if len(protected_password) != PASSWORD_LENGTH:
+                raise RuntimeError("打包后的 DPAPI 密码不能正确恢复。")
+            with py7zr.SevenZipFile(str(dpapi_archive), mode="r",
+                                   password=protected_password) as check:
+                if check.testzip() is not None:
+                    raise RuntimeError("DPAPI 解锁后不能校验独立加密归档。")
+
         report.update(
             {
                 "ok": True,
@@ -879,6 +957,7 @@ def run_packaged_self_test(report_path: str | None = None) -> int:
                 "directory_archive": True,
                 "empty_directory_preserved": True,
                 "crash_recovery_clean": True,
+                "dpapi_packaged": True,
             }
         )
         exit_code = 0
@@ -909,6 +988,8 @@ class EncryptApp:
         self.log_file = log_file
         self.is_busy = False
         self.queue_items: list[Path] = []
+        self.cancel_event = threading.Event()
+        self.password_mode = tk.StringVar(value="plaintext")
 
         root.title(f"{APP_TITLE} v{APP_VERSION}")
         root.geometry("780x520")
@@ -1009,9 +1090,22 @@ class EncryptApp:
         self.start_button.grid(
             row=0, column=1, sticky="e", padx=(12, 0), ipadx=12, ipady=5
         )
+        self.cancel_button = ttk.Button(
+            footer, text="安全取消", command=self.request_cancel)
+        self.cancel_button.grid(row=0, column=2, sticky="e", padx=(8, 0))
+        self.cancel_button.state(["disabled"])
 
-        self.progress = ttk.Progressbar(frame, mode="indeterminate")
-        self.progress.grid(row=6, column=0, sticky="ew", pady=(10, 8))
+        modes = ttk.Frame(frame)
+        modes.grid(row=6, column=0, sticky="ew", pady=(8, 0))
+        ttk.Radiobutton(modes, text="明文 TXT（可跨设备备份）",
+                        variable=self.password_mode, value="plaintext").pack(side="left")
+        ttk.Radiobutton(modes, text="Windows 账户保护（DPAPI）",
+                        variable=self.password_mode, value="dpapi").pack(side="left", padx=(15, 0))
+        self.export_button = ttk.Button(modes, text="导出受保护记录",
+                                         command=self.export_password_record)
+        self.export_button.pack(side="right")
+        self.progress = ttk.Progressbar(frame, mode="determinate", maximum=100)
+        self.progress.grid(row=7, column=0, sticky="ew", pady=(10, 8))
 
         ttk.Label(
             frame,
@@ -1022,7 +1116,7 @@ class EncryptApp:
             wraplength=720,
             foreground="#555555",
             justify="left",
-        ).grid(row=7, column=0, sticky="w")
+        ).grid(row=8, column=0, sticky="w")
 
         self.control_buttons = (
             self.add_files_button,
@@ -1030,6 +1124,7 @@ class EncryptApp:
             self.remove_button,
             self.clear_button,
             self.start_button,
+            self.export_button,
         )
 
     def report_callback_exception(self, exc_type, exc_value, trace) -> None:
@@ -1113,6 +1208,41 @@ class EncryptApp:
         for button in self.control_buttons:
             button.state(["!disabled"] if enabled else ["disabled"])
 
+    def request_cancel(self) -> None:
+        if self.is_busy:
+            self.cancel_event.set()
+            self.cancel_button.state(["disabled"])
+            self.status_var.set("已请求安全取消；正在等待当前文件完成……")
+
+    def export_password_record(self) -> None:
+        """Explicitly decrypt an account-protected record into a plaintext backup."""
+        if self.is_busy:
+            return
+        source = filedialog.askopenfilename(
+            title="选择 Windows DPAPI 受保护密码记录",
+            filetypes=[("文本文件", "*.txt")], parent=self.root)
+        if not source:
+            return
+        target = filedialog.asksaveasfilename(
+            title="选择明文恢复备份保存位置", defaultextension=".txt",
+            filetypes=[("文本文件", "*.txt")], parent=self.root)
+        if not target:
+            return
+        if os.path.abspath(source) == os.path.abspath(target) or os.path.lexists(target):
+            messagebox.showerror("导出失败", "拒绝覆盖现有文件或原始密码记录。", parent=self.root)
+            return
+        if not messagebox.askyesno(
+            "明文密码风险",
+            "导出的 TXT 将包含完整明文解密密码。请存放在安全位置，不要与压缩包一起公开分享。是否继续？",
+            parent=self.root):
+            return
+        try:
+            password_store.export_plaintext(source, target)
+        except (OSError, ValueError, UnicodeError) as exc:
+            messagebox.showerror("导出失败", str(exc), parent=self.root)
+        else:
+            messagebox.showinfo("导出成功", f"明文恢复副本：\n{target}", parent=self.root)
+
     def start_encryption(self) -> None:
         if self.is_busy:
             return
@@ -1183,11 +1313,17 @@ class EncryptApp:
             ):
                 self.status_var.set("已暂停：请先检查上次中断任务留下的文件。")
                 return
+        mode = self.password_mode.get()
+        description = (
+            "明文 TXT 包含完整密码，任何能读取它的人均可解密压缩包。"
+            if mode == "plaintext" else
+            "Windows DPAPI 加密记录绑定当前账户。更换电脑、重装系统或账户密钥丢失时"
+            "可能无法恢复；建议及时使用“导出受保护记录”制作离线恢复副本。"
+            "DPAPI 不防御当前账户权限下的恶意软件。"
+        )
         if not messagebox.askokcancel(
-            "明文密码安全提示",
-            f"即将把完整解密密码写入以下明文 TXT：\n{record_path}\n\n"
-            "任何能读取该 TXT 的人都能解密压缩包。"
-            "请与压缩包分开安全保管。是否继续？",
+            "密码记录安全提示",
+            f"记录位置：\n{record_path}\n\n{description}\n\n是否继续？",
             parent=self.root,
         ):
             self.status_var.set("已取消明文密码保存，未生成文件。")
@@ -1195,9 +1331,11 @@ class EncryptApp:
 
         selected = list(self.queue_items)
         self.is_busy = True
+        self.cancel_event.clear()
         self._set_controls_enabled(False)
+        self.cancel_button.state(["!disabled"])
+        self.progress["value"] = 0
         self.status_var.set(f"已选择 {len(selected)} 个条目，正在准备……")
-        self.progress.start(12)
 
         def report_status(message: str) -> None:
             try:
@@ -1205,15 +1343,47 @@ class EncryptApp:
             except tk.TclError:
                 _safe_warning("窗口已关闭，无法更新处理状态")
 
+        def report_event(event: dict) -> None:
+            def update() -> None:
+                stage = event.get("stage")
+                if stage == "encrypt":
+                    total = int(event.get("total_bytes", 0))
+                    done = int(event.get("completed_bytes", 0))
+                    count = int(event.get("completed_entries", 0))
+                    number = int(event.get("total_entries", 0))
+                    self.progress["value"] = min(100, 100 * done / total) if total else (
+                        100 * count / number if number else 0)
+                    self.status_var.set(
+                        f"正在打包：{count}/{number} 项，已处理 {done:,}/{total:,} 输入字节"
+                        "（进度仅表示打包阶段）")
+                elif stage == "verify":
+                    self.progress["value"] = 100
+                    self.status_var.set("打包完成，正在校验完整性……")
+                elif stage == "publish":
+                    self.cancel_button.state(["disabled"])
+                    self.status_var.set("正在安全发布文件，此阶段不能取消……")
+            try:
+                self.root.after(0, update)
+            except tk.TclError:
+                pass
+
         def worker() -> None:
             try:
                 result = create_encrypted_bundle(
                     selected, str(output_path), report_status,
                     password_file=str(record_path),
+                    password_mode=mode, event_callback=report_event,
+                    cancel_event=self.cancel_event,
                 )
                 self.root.after(
                     0, lambda: self.finish_success(result, len(selected))
                 )
+            except TaskCancelled as exc:
+                message = str(exc)
+                try:
+                    self.root.after(0, lambda: self.finish_cancel(message))
+                except tk.TclError:
+                    pass
             except Exception as exc:
                 detail = str(exc) or type(exc).__name__
                 _safe_log("加密任务失败")
@@ -1236,8 +1406,14 @@ class EncryptApp:
         self.is_busy = False
         try:
             self.progress.stop()
+            self.cancel_button.state(["disabled"])
         finally:
             self._set_controls_enabled(True)
+
+    def finish_cancel(self, message: str) -> None:
+        self._finish_task()
+        self.progress["value"] = 0
+        self.status_var.set(message)
 
     def finish_success(self, result: tuple[str, str], count: int) -> None:
         self._finish_task()
@@ -1246,7 +1422,9 @@ class EncryptApp:
         messagebox.showinfo(
             "处理完成",
             f"加密文件已生成。\n\n压缩包：{Path(archive_path).name}\n"
-            f"密码记录：{Path(txt_path).name}\n\n保存位置：{Path(archive_path).parent}",
+            f"密码记录：{Path(txt_path).name}\n\n"
+            f"压缩包目录：{Path(archive_path).parent}\n"
+            f"密码记录目录：{Path(txt_path).parent}",
             parent=self.root,
         )
 

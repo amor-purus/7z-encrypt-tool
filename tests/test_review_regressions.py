@@ -281,6 +281,11 @@ class ReviewGuiTests(unittest.TestCase):
         self.app.queue_items = [source]
         self.app.status_var = DummyStatus()
         self.app.progress = DummyControl()
+        self.app.cancel_button = DummyControl()
+        self.app.cancel_event = threading.Event()
+        self.app.password_mode = DummyStatus()
+        self.app.password_mode.value = "plaintext"
+        self.app.password_mode.get = lambda: self.app.password_mode.value
         self.app.control_buttons = [DummyControl() for _ in range(5)]
 
     def tearDown(self):

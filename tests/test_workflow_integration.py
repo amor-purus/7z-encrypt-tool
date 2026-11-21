@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -182,6 +183,8 @@ class DummyControl:
         self.stopped = False
     def stop(self):
         self.stopped = True
+    def __setitem__(self, key, value):
+        setattr(self, key, value)
 
 
 class DummyStatus:
@@ -224,6 +227,11 @@ class GuiFailureRecoveryTests(unittest.TestCase):
         self.app.queue_items = [self.source]
         self.app.status_var = DummyStatus()
         self.app.progress = DummyControl()
+        self.app.cancel_button = DummyControl()
+        self.app.cancel_event = threading.Event()
+        self.app.password_mode = DummyStatus()
+        self.app.password_mode.value = "plaintext"
+        self.app.password_mode.get = lambda: self.app.password_mode.value
         self.app.control_buttons = [DummyControl() for _ in range(5)]
 
     def tearDown(self):

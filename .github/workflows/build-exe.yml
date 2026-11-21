@@ -73,10 +73,22 @@ jobs:
           python -m pip freeze --all
 
       - name: Compile application and tests
-        run: python -m compileall -q main.py crash_recovery.py tests pyinstaller_hooks
+        run: python -m compileall -q main.py crash_recovery.py password_store.py tests pyinstaller_hooks
+
+      - name: Require independent official 7-Zip decoder
+        shell: pwsh
+        run: |
+          $seven = Join-Path $env:ProgramFiles "7-Zip\7z.exe"
+          if (-not (Test-Path $seven)) { choco install 7zip -y --no-progress }
+          if (-not (Test-Path $seven)) { throw "Official 7z.exe unavailable" }
+          "SEVEN_ZIP_EXE=$seven" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "REQUIRE_EXTERNAL_7Z=1" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       - name: Run source regression tests
         run: python -m unittest discover -s tests -v
+
+      - name: Record synthetic large-file performance baseline
+        run: python benchmarks/benchmark_encrypt.py --size-mib 8 --small-files 100
 
       - name: Build single-file windowed EXE
         run: python -m PyInstaller --clean --noconfirm 7z-encrypt-tool.spec
@@ -106,7 +118,8 @@ jobs:
             -not $result.archive_round_trip -or
             -not $result.directory_archive -or
             -not $result.empty_directory_preserved -or
-            -not $result.crash_recovery_clean
+            -not $result.crash_recovery_clean -or
+            -not $result.dpapi_packaged
           ) {
             throw "The frozen EXE self-test report indicates a failed check."
           }
@@ -148,7 +161,7 @@ jobs:
 
   release:
     name: Publish unsigned GitHub Release
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: "${{ startsWith(github.ref, 'refs/tags/v') || (github.ref == 'refs/heads/main' && startsWith(github.event.head_commit.message, 'release: v2.0.0')) }}"
     needs:
       - build
     runs-on: ubuntu-latest
@@ -166,11 +179,15 @@ jobs:
         id: release_tag
         shell: bash
         run: |
-          if [[ "$GITHUB_REF_TYPE" != tag || ! "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "Only an explicit vMAJOR.MINOR.PATCH tag may publish a Release."
+          if [[ "$GITHUB_REF_TYPE" == tag && "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            tag="$GITHUB_REF_NAME"
+          elif [[ "$GITHUB_REF_TYPE" == branch && "$GITHUB_REF_NAME" == main && "$GITHUB_EVENT_NAME" == push ]]; then
+            # One-time v2.0.0 release is gated by the main push's release: message.
+            tag="v2.0.0"
+          else
+            echo "Release requires a version tag or the tested v2.0.0 main release commit."
             exit 1
           fi
-          tag="$GITHUB_REF_NAME"
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
 
       - name: Attach unsigned EXE and provenance to GitHub Release

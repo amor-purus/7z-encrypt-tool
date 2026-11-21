@@ -21,6 +21,7 @@ a = Analysis(
         "multivolumefile",
         "texttable",
         "compression.zstd",
+        "password_store",
         "tkinter",
         "tkinter.filedialog",
         "tkinter.messagebox",

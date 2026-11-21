@@ -5,7 +5,7 @@
 
 ## Decision
 
-The complete generated password remains readable plaintext in a TXT recovery record, but the user **must explicitly select its destination** outside the archive's output directory. The GUI displays a clear plaintext-password warning and requires confirmation. The application must not silently create a password TXT beside the archive. An existing TXT is never overwritten.
+When the user selects **plaintext compatibility mode**, the complete generated password remains readable plaintext in a TXT recovery record, but the user **must explicitly select its destination** outside the archive's output directory. Starting in v2.0.0, an optional Windows DPAPI mode stores protected ciphertext in the separate TXT record; see [Decision 0002](0002-optional-windows-dpapi-password-record.md). The GUI displays a clear plaintext-password warning and requires confirmation. The application must not silently create a password TXT beside the archive. An existing TXT is never overwritten.
 
 Both products are considered successful only when the encrypted archive is verified, the password record has been durably written and the final archive published. On failure the application cleans up temporary files and rolls back a password record published during that failed attempt where possible. Source files remain untouched.
 
