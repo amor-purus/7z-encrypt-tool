@@ -93,6 +93,15 @@ Application logs are written to:
 
 If the application reports an error, include this log when reporting the issue. It may contain local file paths; review it before sharing.
 
+## Performance baseline
+
+Run `python benchmarks/benchmark_encrypt.py --size-mib 16 --small-files 300`
+in the pinned Windows build environment to record elapsed time, throughput, archive size
+and Python-heap peak memory using synthetic data only. Compare results on the
+**same hardware and settings** before claiming a performance improvement. The
+tool intentionally does not weaken double-hash verification or crash safety for speed.
+No hard-coded throughput assertion is applied to different GitHub-hosted runners.
+
 ## Build from source (maintainers)
 
 The canonical build uses Windows Server 2025 x64, CPython 3.14.10, pip 26.3, and the complete pinned dependency set in `requirements-lock.txt`. The application is packaged with the committed `7z-encrypt-tool.spec` and `pyinstaller_hooks/hook-py7zr.py`.
