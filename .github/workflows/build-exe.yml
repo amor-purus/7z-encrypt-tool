@@ -87,6 +87,9 @@ jobs:
       - name: Run source regression tests
         run: python -m unittest discover -s tests -v
 
+      - name: Record synthetic large-file performance baseline
+        run: python benchmarks/benchmark_encrypt.py --size-mib 8 --small-files 100
+
       - name: Build single-file windowed EXE
         run: python -m PyInstaller --clean --noconfirm 7z-encrypt-tool.spec
 
