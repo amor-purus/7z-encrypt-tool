@@ -115,7 +115,8 @@ jobs:
             -not $result.archive_round_trip -or
             -not $result.directory_archive -or
             -not $result.empty_directory_preserved -or
-            -not $result.crash_recovery_clean
+            -not $result.crash_recovery_clean -or
+            -not $result.dpapi_packaged
           ) {
             throw "The frozen EXE self-test report indicates a failed check."
           }
