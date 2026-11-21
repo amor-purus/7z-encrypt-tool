@@ -920,6 +920,32 @@ def run_packaged_self_test(report_path: str | None = None) -> int:
             ):
                 raise RuntimeError("文件夹归档解压后与原始目录树不一致。")
 
+            # Validate the optional Windows DPAPI mode from the frozen EXE
+            # itself, not only from source-level unit tests.
+            dpapi_archive_dir = root / "dpapi-archives"
+            dpapi_password_dir = root / "dpapi-passwords"
+            dpapi_archive_dir.mkdir()
+            dpapi_password_dir.mkdir()
+            dpapi_archive, dpapi_record = create_encrypted_bundle(
+                [payload], str(dpapi_archive_dir),
+                password_file=str(dpapi_password_dir / "protected.txt"),
+                password_mode="dpapi"
+            )
+            raw_record = Path(dpapi_record).read_bytes()
+            if not raw_record.startswith(password_store.MAGIC):
+                raise RuntimeError("打包后的 EXE 未能生成 DPAPI 受保护记录。")
+            decoded = password_store.decode_record(raw_record)
+            protected_password = next(
+                line.partition("：")[2] for line in decoded.splitlines()
+                if line.startswith("密码：")
+            )
+            if len(protected_password) != PASSWORD_LENGTH:
+                raise RuntimeError("打包后的 DPAPI 密码不能正确恢复。")
+            with py7zr.SevenZipFile(str(dpapi_archive), mode="r",
+                                   password=protected_password) as check:
+                if check.testzip() is not None:
+                    raise RuntimeError("DPAPI 解锁后不能校验独立加密归档。")
+
         report.update(
             {
                 "ok": True,
@@ -931,6 +957,7 @@ def run_packaged_self_test(report_path: str | None = None) -> int:
                 "directory_archive": True,
                 "empty_directory_preserved": True,
                 "crash_recovery_clean": True,
+                "dpapi_packaged": True,
             }
         )
         exit_code = 0
