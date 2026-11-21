@@ -73,7 +73,16 @@ jobs:
           python -m pip freeze --all
 
       - name: Compile application and tests
-        run: python -m compileall -q main.py crash_recovery.py tests pyinstaller_hooks
+        run: python -m compileall -q main.py crash_recovery.py password_store.py tests pyinstaller_hooks
+
+      - name: Require independent official 7-Zip decoder
+        shell: pwsh
+        run: |
+          $seven = Join-Path $env:ProgramFiles "7-Zip\7z.exe"
+          if (-not (Test-Path $seven)) { choco install 7zip -y --no-progress }
+          if (-not (Test-Path $seven)) { throw "Official 7z.exe unavailable" }
+          "SEVEN_ZIP_EXE=$seven" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "REQUIRE_EXTERNAL_7Z=1" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       - name: Run source regression tests
         run: python -m unittest discover -s tests -v
