@@ -1,4 +1,4 @@
-# 7z File Encryption Tool v1.5.0
+# 7z File Encryption Tool v2.0.0
 
 A standalone Windows 11 GUI application for creating AES-256 encrypted 7z archives from files, folders, or a mixed selection.
 
@@ -8,10 +8,19 @@ A standalone Windows 11 GUI application for creating AES-256 encrypted 7z archiv
 2. Verify its SHA-256 against `SHA256SUMS.txt`.
 3. Double-click the EXE. No Python installation, BAT launcher, virtual environment, pip, or administrator rights are required.
 4. Add files and/or folders to the queue, then click **Start encryption** and choose an output folder.
-5. Select a separate destination for the plaintext password TXT. The app warns you before writing a plaintext password.
+5. Choose a separate password-record TXT destination and select either plaintext recovery or current-Windows-account DPAPI protection.
 6. Wait for compression and integrity verification to finish.
 
 The EXE is a single-file, windowed PyInstaller build. It does not open a persistent console window. The first launch can take a little longer because PyInstaller extracts its bundled runtime to a temporary directory.
+
+## v2.0: interoperability, password options and cancellation
+
+- **Independent compatibility gate:** Windows CI verifies an encrypted archive with the official 7-Zip decoder, checks the wrong-password rejection, and compares extracted file SHA-256 values against the inputs, including Japanese text and an empty directory. The installed app still uses py7zr for its internal checks.
+- **Windows DPAPI option:** the password TXT can contain current-user account-bound DPAPI ciphertext instead of plaintext. Use **导出受保护记录** while signed into the original account to create a deliberately confirmed portable plaintext recovery copy. **If your Windows identity or DPAPI keys are lost, protected records may become undecryptable.** Malware running as the same user may also decrypt them. Plaintext mode remains available.
+- **Real data progress:** during the packaging stage the UI shows completed input bytes and archive members, then switches to verification and publication status. This is not a percentage of total execution time.
+- **Safe cooperative cancel:** the UI supports cancellation between archive members; it does not kill a partially executing write or interrupt final file publication. The existing transaction journal controls cleanup.
+- **Testing:** stress scenarios with nested Unicode files, source changes, forced disk errors, and protected-record failures are added to Windows CI.
+- **Cryptographic boundary:** 7z AES-256 and header encryption protect confidentiality. CRC/integrity checks and unkeyed SHA-256 do not themselves authenticate files against an adversary able to replace the files or checksum.
 
 ## Selecting files and folders
 
@@ -26,7 +35,7 @@ Each selected folder is stored under a top-level archive path and includes its n
 
 ## Password-record safety
 
-The application generates a 32-character password using Python's `secrets` module and keeps the 7z member names and data encrypted. Before starting encryption, you must select a password TXT destination **in a different directory** from the archive, and confirm a warning that the TXT contains the complete plaintext password.
+The application generates a 32-character password using Python's `secrets` module and encrypts 7z data and headers. Select a password-record destination **in a different directory** from the archive. Plaintext mode warns that the TXT contains the password; DPAPI mode warns about account-bound recovery and offers an explicitly confirmed plaintext export.
 
 No password TXT is automatically written next to the archive. Existing password files are never overwritten. If saving the password fails, the verified archive is not published; temporary outputs are cleaned. On ordinary publication failure the password record is rolled back when the archive is demonstrably absent. If archive publication succeeds or its state cannot be confirmed, the password is **retained**, even when an asynchronous exception is raised. A cross-directory two-file transaction and power-loss durability cannot be guaranteed; a terminated process can leave recoverable staging files or an orphan password record. See [Decision 0001](docs/decisions/0001-plaintext-password-companion-file.md).
 
