@@ -157,7 +157,7 @@ jobs:
 
   release:
     name: Publish unsigned GitHub Release
-    if: startsWith(github.ref, 'refs/tags/v') || (github.ref == 'refs/heads/main' && startsWith(github.event.head_commit.message, 'release: v2.0.0'))
+    if: "${{ startsWith(github.ref, 'refs/tags/v') || (github.ref == 'refs/heads/main' && startsWith(github.event.head_commit.message, 'release: v2.0.0')) }}"
     needs:
       - build
     runs-on: ubuntu-latest
