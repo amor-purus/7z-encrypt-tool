@@ -1378,6 +1378,7 @@ class EncryptApp:
     def _finish_task(self) -> None:
         self.is_busy = False
         try:
+            self.progress.stop()
             self.cancel_button.state(["disabled"])
         finally:
             self._set_controls_enabled(True)
