@@ -1,5 +1,15 @@
 # Changelog
 
+## v2.0.0 — integrated reliability, password safety and user experience
+
+- Added optional Windows DPAPI password records with explicit plaintext export and recovery warnings.
+- Added true input-byte progress, package-member counters, and cooperative cancellation before final publication.
+- Added official 7-Zip independent extraction and file SHA-256 interoperability validation to the Windows build gate.
+- Added stress and fault-injection regression coverage, preserving the established two-path transaction journal.
+- Documented the difference between 7z encryption, file consistency checks, and authenticated provenance.
+- Kept plaintext TXT and existing 7z archives compatible; no custom encryption format was added.
+
+
 ## v1.5.0 — 2026-11-16
 
 - Added a persistent, metadata-only transaction journal before creation of any stage file.
